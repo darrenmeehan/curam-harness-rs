@@ -41,7 +41,9 @@ fn okish(ok: bool, error: &str) -> Value {
 }
 
 fn need_str(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 pub fn tool_read(workdir: &Path, args: &Value) -> Value {
@@ -176,7 +178,9 @@ mod tests {
 
     #[test]
     fn write_read_edit_roundtrip() {
-        let dir = std::env::temp_dir().join("curam-h3-t").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h3-t")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let wd = &dir;
         let w = tool_write(
@@ -190,7 +194,10 @@ mod tests {
 
         let e = tool_edit(
             wd,
-            &serde_json::from_str("{\"path\":\"a/b.txt\",\"old_text\":\"hello\",\"new_text\":\"bye\"}").unwrap(),
+            &serde_json::from_str(
+                "{\"path\":\"a/b.txt\",\"old_text\":\"hello\",\"new_text\":\"bye\"}",
+            )
+            .unwrap(),
         );
         assert_eq!(e["ok"], true);
         let r2 = tool_read(wd, &serde_json::from_str("{\"path\":\"a/b.txt\"}").unwrap());
@@ -199,7 +206,8 @@ mod tests {
         // missing old_text reports failure, does not crash
         let e2 = tool_edit(
             wd,
-            &serde_json::from_str("{\"path\":\"a/b.txt\",\"old_text\":\"zzz\",\"new_text\":\"x\"}").unwrap(),
+            &serde_json::from_str("{\"path\":\"a/b.txt\",\"old_text\":\"zzz\",\"new_text\":\"x\"}")
+                .unwrap(),
         );
         assert_eq!(e2["ok"], false);
         assert!(e2["error"].as_str().unwrap().contains("not found"));
@@ -212,11 +220,20 @@ mod tests {
 
     #[test]
     fn edit_replaces_only_first_occurrence() {
-        let dir = std::env::temp_dir().join("curam-h3-u").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h3-u")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let wd = &dir;
-        tool_write(wd, &serde_json::from_str("{\"path\":\"f.txt\",\"content\":\"a b a\"}").unwrap());
-        tool_edit(wd, &serde_json::from_str("{\"path\":\"f.txt\",\"old_text\":\"a\",\"new_text\":\"x\"}").unwrap());
+        tool_write(
+            wd,
+            &serde_json::from_str("{\"path\":\"f.txt\",\"content\":\"a b a\"}").unwrap(),
+        );
+        tool_edit(
+            wd,
+            &serde_json::from_str("{\"path\":\"f.txt\",\"old_text\":\"a\",\"new_text\":\"x\"}")
+                .unwrap(),
+        );
         let r = tool_read(wd, &serde_json::from_str("{\"path\":\"f.txt\"}").unwrap());
         assert_eq!(r["content"], "x b a");
         std::fs::remove_dir_all(&dir).ok();

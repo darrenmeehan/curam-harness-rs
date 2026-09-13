@@ -13,8 +13,8 @@ mod budget;
 mod config;
 mod doctor;
 mod journal;
-mod provider;
 mod policy;
+mod provider;
 mod sanitize;
 mod sli;
 mod tools;
@@ -193,10 +193,8 @@ fn one_shot(loader: &config::Loader, task: String, quiet: bool) -> i32 {
         }
         Ok(x) => x,
     };
-    let mut jj = match journal::Journal::open(
-        config::expand_home(cfg.journal.path.as_str()),
-        None,
-    ) {
+    let mut jj = match journal::Journal::open(config::expand_home(cfg.journal.path.as_str()), None)
+    {
         Err(e) => {
             eprintln!("curam: {e}");
             return EXIT_ERROR;

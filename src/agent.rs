@@ -137,7 +137,11 @@ impl Agent {
     /// Run one task to completion (or the iteration cap), journaling every
     /// step. Returns the final answer (None when the run bailed on a
     /// provider error).
-    pub fn run_task(&mut self, task: &str, journal: &mut Journal) -> Result<Option<String>, String> {
+    pub fn run_task(
+        &mut self,
+        task: &str,
+        journal: &mut Journal,
+    ) -> Result<Option<String>, String> {
         journal.log("user_message", &Value::Object(mapof("text", task.into())))?;
         self.messages.push(ApiMessage {
             role: "user".into(),
@@ -152,7 +156,10 @@ impl Agent {
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             });
-            journal.log("model_message", &Value::Object(mapof("text", GREETING_REPLY.into())))?;
+            journal.log(
+                "model_message",
+                &Value::Object(mapof("text", GREETING_REPLY.into())),
+            )?;
             return Ok(Some(GREETING_REPLY.into()));
         }
 
@@ -163,7 +170,10 @@ impl Agent {
                 let spent = round4(self.budget.spent_usd);
                 let cap = round4(self.budget.cap_usd);
                 let msg = format!("Budget exhausted (${} / ${}). Halting.", spent, cap);
-                journal.log("budget_hit", &Value::Object(mapof("msg", msg.clone().into())))?;
+                journal.log(
+                    "budget_hit",
+                    &Value::Object(mapof("msg", msg.clone().into())),
+                )?;
                 return Ok(Some(msg));
             }
 
@@ -178,11 +188,19 @@ impl Agent {
                         Some(u) => usage_value(u),
                         None => serde_json::Value::Null,
                     };
-                    let cost = self.budget.charge(self.provider.model.as_str(), &usage_v, journal).unwrap_or(0.0);
-                    journal.log("model_response", &Value::Object(mapof2(
-                        "model", self.provider.model.as_str().into(),
-                        "cost", cost.into(),
-                    )))?;
+                    let cost = self
+                        .budget
+                        .charge(self.provider.model.as_str(), &usage_v, journal)
+                        .unwrap_or(0.0);
+                    journal.log(
+                        "model_response",
+                        &Value::Object(mapof2(
+                            "model",
+                            self.provider.model.as_str().into(),
+                            "cost",
+                            cost.into(),
+                        )),
+                    )?;
 
                     if resp.tool_calls.is_empty() {
                         let answer = resp.content.unwrap_or_default();
@@ -192,7 +210,10 @@ impl Agent {
                             tool_call_id: None,
                             tool_calls: Vec::new(),
                         });
-                        journal.log("model_message", &Value::Object(mapof("text", answer.clone().into())))?;
+                        journal.log(
+                            "model_message",
+                            &Value::Object(mapof("text", answer.clone().into())),
+                        )?;
                         return Ok(Some(answer));
                     }
 
@@ -206,24 +227,44 @@ impl Agent {
                     for tc in &resp.tool_calls {
                         let args = parse_tool_args(tc.arguments.as_str());
                         if self.show_commands {
-                            println!("\x1b[36m▶ {} {}\x1b[0m", tc.name, serde_json::to_string(&args).expect("args json"));
+                            println!(
+                                "\x1b[36m▶ {} {}\x1b[0m",
+                                tc.name,
+                                serde_json::to_string(&args).expect("args json")
+                            );
                         }
-                        journal.log("tool_call", &Value::Object(mapof2(
-                            "name", tc.name.clone().into(),
-                            "args", args.clone(),
-                        )))?;
+                        journal.log(
+                            "tool_call",
+                            &Value::Object(mapof2(
+                                "name",
+                                tc.name.clone().into(),
+                                "args",
+                                args.clone(),
+                            )),
+                        )?;
 
                         let result = self.execute_tool(tc.name.as_str(), &args, journal);
-                        journal.log("tool_result", &Value::Object(mapof2(
-                            "name", tc.name.clone().into(),
-                            "result", result.clone(),
-                        )))?;
+                        journal.log(
+                            "tool_result",
+                            &Value::Object(mapof2(
+                                "name",
+                                tc.name.clone().into(),
+                                "result",
+                                result.clone(),
+                            )),
+                        )?;
                         if self.show_commands {
-                            println!("\x1b[37m{}\x1b[0m", serde_json::to_string(&result).expect("result json"));
+                            println!(
+                                "\x1b[37m{}\x1b[0m",
+                                serde_json::to_string(&result).expect("result json")
+                            );
                         }
 
                         // stuck detection: N identical consecutive calls
-                        let cur = (tc.name.clone(), serde_json::to_string(&args).expect("args ser"));
+                        let cur = (
+                            tc.name.clone(),
+                            serde_json::to_string(&args).expect("args ser"),
+                        );
                         if let Some(prev) = &last_tool {
                             if *prev == cur {
                                 identical_streak += 1;
@@ -236,12 +277,18 @@ impl Agent {
                         last_tool = Some(cur);
                         if identical_streak >= STUCK_THRESHOLD && self.interactive {
                             // full ask UX lands in H4; journal the nudge for now
-                            journal.log("ask_human", &Value::Object(mapof2(
-                                "kind", "stuck".into(),
-                                "attempts", serde_json::Value::Array(vec![Value::Object(mapof(
-                                    "name", tc.name.clone().into(),
-                                ))]),
-                            )))?;
+                            journal.log(
+                                "ask_human",
+                                &Value::Object(mapof2(
+                                    "kind",
+                                    "stuck".into(),
+                                    "attempts",
+                                    serde_json::Value::Array(vec![Value::Object(mapof(
+                                        "name",
+                                        tc.name.clone().into(),
+                                    ))]),
+                                )),
+                            )?;
                         }
 
                         // The model context gets the SCRUBBED result; the
@@ -266,7 +313,10 @@ impl Agent {
                     // required by the OpenAI tool protocol).
                     self.messages.push(ApiMessage {
                         role: "assistant".into(),
-                        content: resp.content.clone().unwrap_or_else(|| "[continued tool use]".into()),
+                        content: resp
+                            .content
+                            .clone()
+                            .unwrap_or_else(|| "[continued tool use]".into()),
                         tool_call_id: None,
                         tool_calls: resp.tool_calls.clone(),
                     });
@@ -383,7 +433,9 @@ mod tests {
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("curam-h3-a-{tag}")).join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join(format!("curam-h3-a-{tag}"))
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -410,7 +462,8 @@ mod tests {
         std::fs::write(
             &secret_file,
             "planted sk-or-deadbeefdeadbeefdeadbeef used here".as_bytes(),
-        ).unwrap();
+        )
+        .unwrap();
         let capture = dir.join("bodies.txt");
         let read_call = r#"{"choices":[{"message":{"role":"assistant","content":"Let me read that.","tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"secret-notes.txt\"}"}}]}}],"usage":{"prompt_tokens":8,"completion_tokens":6}}"#;
         let answer = r#"{"choices":[{"message":{"role":"assistant","content":"Done — read secret-notes.txt."}}],"usage":{"prompt_tokens":20,"completion_tokens":4}}"#;
@@ -426,7 +479,9 @@ mod tests {
         let trs = j.events(Some("tool_result")).unwrap();
         assert_eq!(trs.len(), 1);
         assert!(
-            serde_json::to_string(&trs[0].payload).expect("json").contains("deadbeef"),
+            serde_json::to_string(&trs[0].payload)
+                .expect("json")
+                .contains("deadbeef"),
             "journal keeps the raw result"
         );
 
@@ -436,11 +491,19 @@ mod tests {
             !captured.contains("deadbeef"),
             "secret must not cross the provider boundary: {captured}"
         );
-        assert!(captured.contains("{REDACTED}:openrouter"), "context scrubbed");
+        assert!(
+            captured.contains("{REDACTED}:openrouter"),
+            "context scrubbed"
+        );
 
         // Full journal chain: user_message, tool_call, tool_result, model_message.
         const WANTED: &[&str] = &["user_message", "tool_call", "tool_result", "model_message"];
-        let kinds = j.events(None).unwrap().iter().map(|e| e.etype.clone()).collect::<Vec<_>>();
+        let kinds = j
+            .events(None)
+            .unwrap()
+            .iter()
+            .map(|e| e.etype.clone())
+            .collect::<Vec<_>>();
         for want in WANTED {
             let found = kinds.iter().any(|k| k == want);
             assert!(found, "missing journal event {want}");
@@ -462,9 +525,17 @@ mod tests {
         let mut a = agent_for(&cfg, &dir);
         let mut j = Journal::open(dir.join("j.db"), Some("sess".into())).unwrap();
         let ans = a.run_task("loop", &mut j).unwrap();
-        assert!(ans.clone().unwrap().contains("Stopped after 25 iterations"), "{ans:?}");
+        assert!(
+            ans.clone().unwrap().contains("Stopped after 25 iterations"),
+            "{ans:?}"
+        );
         let errs = j.events(Some("error")).unwrap();
-        assert!(errs.iter().any(|e| e.payload.get("msg").and_then(|m| m.as_str()).unwrap_or_default().contains("iterations")));
+        assert!(errs.iter().any(|e| e
+            .payload
+            .get("msg")
+            .and_then(|m| m.as_str())
+            .unwrap_or_default()
+            .contains("iterations")));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -24,11 +24,23 @@ const PATTERNS: &[(&str, &str)] = &[
     ("github_fine_grained", "\\bgithub_pat_[A-Za-z0-9_]{20,}\\b"),
     ("slack", "\\bxox[baprs]-[A-Za-z0-9-]{10,}\\b"),
     ("google", "\\bAIza[0-9A-Za-z_-]{30,}\\b"),
-    ("jwt", "\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b"),
-    ("email", "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b"),
-    ("private_key", "(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"),
+    (
+        "jwt",
+        "\\beyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\b",
+    ),
+    (
+        "email",
+        "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b",
+    ),
+    (
+        "private_key",
+        "(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    ),
     ("generic_sk", "\\bsk-[A-Za-z0-9_-]{16,}\\b"),
-    ("key_value", "(?i)\\b(?:token|secret|api[_-]?key)\\s*[=:]\\s*[\'\"]?[A-Za-z0-9_\\-./+=]{12,}"),
+    (
+        "key_value",
+        "(?i)\\b(?:token|secret|api[_-]?key)\\s*[=:]\\s*[\'\"]?[A-Za-z0-9_\\-./+=]{12,}",
+    ),
 ];
 
 fn compiled_patterns() -> &'static Vec<(String, Regex)> {
@@ -36,7 +48,12 @@ fn compiled_patterns() -> &'static Vec<(String, Regex)> {
     C.get_or_init(|| {
         PATTERNS
             .iter()
-            .map(|(kind, pat)| (kind.to_string(), Regex::new(pat).expect("valid sanitize regex")))
+            .map(|(kind, pat)| {
+                (
+                    kind.to_string(),
+                    Regex::new(pat).expect("valid sanitize regex"),
+                )
+            })
             .collect()
     })
 }
@@ -78,7 +95,9 @@ impl Sanitizer {
         for (kind, re) in compiled_patterns() {
             let replacement = format!("{}:{}", self.placeholder, kind);
             masked += re.find_iter(out.as_str()).count();
-            let next = re.replace_all(out.as_str(), replacement.as_str()).to_string();
+            let next = re
+                .replace_all(out.as_str(), replacement.as_str())
+                .to_string();
             out = next;
         }
         for dom in &self.internal_domains {
@@ -94,7 +113,9 @@ impl Sanitizer {
                 .expect("valid domain pattern");
             masked += pat.find_iter(out.as_str()).count();
             let replacement = format!("{}:domain", self.placeholder);
-            out = pat.replace_all(out.as_str(), replacement.as_str()).to_string();
+            out = pat
+                .replace_all(out.as_str(), replacement.as_str())
+                .to_string();
         }
         self.spans_masked += masked as u64;
         out
@@ -117,7 +138,10 @@ mod tests {
     fn masks_secrets_and_emails() {
         let mut s = scrubber("deterministic");
         let out = s.scrub("key sk-or-abcdefghijklmnop123456 used here; mail a@b.com");
-        assert!(!out.contains("sk-or-abcdefghijklmnop123456"), "secret masked");
+        assert!(
+            !out.contains("sk-or-abcdefghijklmnop123456"),
+            "secret masked"
+        );
         assert!(!out.contains("a@b.com"), "email masked");
         assert!(out.contains("{REDACTED}:openrouter"), "labeled placeholder");
         assert!(out.contains("{REDACTED}:email"), "email placeholder");
@@ -142,7 +166,10 @@ mod tests {
     #[test]
     fn disabled_is_noop() {
         let mut s = scrubber("off");
-        assert_eq!(s.scrub("key sk-or-abcdefghijklmnop123456"), "key sk-or-abcdefghijklmnop123456");
+        assert_eq!(
+            s.scrub("key sk-or-abcdefghijklmnop123456"),
+            "key sk-or-abcdefghijklmnop123456"
+        );
     }
 
     #[test]

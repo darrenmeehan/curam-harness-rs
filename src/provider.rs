@@ -495,7 +495,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 tool_call_id: None,
-                    tool_calls: Vec::new(),
+                tool_calls: Vec::new(),
             }])
             .unwrap();
         assert_eq!(msg.tool_calls.len(), 1);
@@ -514,7 +514,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 tool_call_id: None,
-                    tool_calls: Vec::new(),
+                tool_calls: Vec::new(),
             }])
             .unwrap();
         assert_eq!(msg.content.unwrap(), "hello there");
@@ -539,7 +539,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 tool_call_id: None,
-                    tool_calls: Vec::new(),
+                tool_calls: Vec::new(),
             }])
             .unwrap();
         assert_eq!(msg.content.unwrap(), "Hello");
@@ -556,7 +556,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
             tool_call_id: None,
-                tool_calls: Vec::new(),
+            tool_calls: Vec::new(),
         }]);
         assert!(res.is_err());
         let e = res.unwrap_err();
@@ -575,7 +575,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
             tool_call_id: None,
-                tool_calls: Vec::new(),
+            tool_calls: Vec::new(),
         }]);
         assert!(res.is_err());
         assert!(res.unwrap_err().msg.contains("non-JSON"), "non-JSON error");
@@ -589,7 +589,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
             tool_call_id: None,
-                tool_calls: Vec::new(),
+            tool_calls: Vec::new(),
         }]);
         assert!(res.is_err());
         assert!(res.unwrap_err().msg.contains("401"), "status code surfaced");
