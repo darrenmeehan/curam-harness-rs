@@ -31,11 +31,14 @@ pub struct ApiMessage {
     pub role: String,
     pub content: String,
     pub tool_call_id: Option<String>,
+    /// assistant turns carry the tool_calls they requested (replayed to the
+    /// provider so the conversation stays consistent)
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// A tool call the model asked for (arguments arrive as a JSON string; the
 /// agent parses them like provider.py's json.loads).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -256,6 +259,19 @@ impl Provider {
             mm.insert("content".to_owned(), msg.content.as_str().into());
             if let Some(id) = &msg.tool_call_id {
                 mm.insert("tool_call_id".to_owned(), id.to_string().into());
+            }
+            if !msg.tool_calls.is_empty() {
+                let tcs = msg.tool_calls.iter().map(|tc| {
+                    let mut f = serde_json::Map::new();
+                    f.insert("name".to_owned(), tc.name.as_str().into());
+                    f.insert("arguments".to_owned(), tc.arguments.as_str().into());
+                    let mut tcm = serde_json::Map::new();
+                    tcm.insert("id".to_owned(), tc.id.as_str().into());
+                    tcm.insert("type".to_owned(), "function".into());
+                    tcm.insert("function".to_owned(), serde_json::Value::Object(f));
+                    serde_json::Value::Object(tcm)
+                });
+                mm.insert("tool_calls".to_owned(), tcs.collect::<Vec<Value>>().into());
             }
             serde_json::Value::Object(mm)
         });
@@ -479,6 +495,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 tool_call_id: None,
+                    tool_calls: Vec::new(),
             }])
             .unwrap();
         assert_eq!(msg.tool_calls.len(), 1);
@@ -497,6 +514,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 tool_call_id: None,
+                    tool_calls: Vec::new(),
             }])
             .unwrap();
         assert_eq!(msg.content.unwrap(), "hello there");
@@ -521,6 +539,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 tool_call_id: None,
+                    tool_calls: Vec::new(),
             }])
             .unwrap();
         assert_eq!(msg.content.unwrap(), "Hello");
@@ -537,6 +556,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
             tool_call_id: None,
+                tool_calls: Vec::new(),
         }]);
         assert!(res.is_err());
         let e = res.unwrap_err();
@@ -555,6 +575,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
             tool_call_id: None,
+                tool_calls: Vec::new(),
         }]);
         assert!(res.is_err());
         assert!(res.unwrap_err().msg.contains("non-JSON"), "non-JSON error");
@@ -568,6 +589,7 @@ mod tests {
             role: "user".into(),
             content: "hi".into(),
             tool_call_id: None,
+                tool_calls: Vec::new(),
         }]);
         assert!(res.is_err());
         assert!(res.unwrap_err().msg.contains("401"), "status code surfaced");

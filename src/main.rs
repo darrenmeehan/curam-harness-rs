@@ -8,12 +8,16 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod agent;
 mod budget;
 mod config;
 mod doctor;
 mod journal;
 mod provider;
+mod policy;
+mod sanitize;
 mod sli;
+mod tools;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
@@ -157,7 +161,7 @@ fn run(cli: &Cli) -> i32 {
                 println!("(the TUI/REPL land in H5)");
                 return EXIT_OK;
             }
-            one_shot(cli.task.join(" "))
+            one_shot(&loader, cli.task.join(" "), cli.quiet)
         }
         Some(Commands::Init { dir }) => cmd_init(&loader, dir),
         Some(Commands::Config {
@@ -172,12 +176,56 @@ fn run(cli: &Cli) -> i32 {
     }
 }
 
-/// One-shot task: the provider + agent loop land in H3.
-fn one_shot(task: String) -> i32 {
-    eprintln!(
-        "curam: task not run — the agent loop (provider + tools) lands in H3 (task was: {task})"
+/// One-shot task: a real agent run (provider + file tools; ask/exec layers
+/// land in H4).
+fn one_shot(loader: &config::Loader, task: String, quiet: bool) -> i32 {
+    let cfg = match loader.load() {
+        Err(e) => {
+            eprintln!("{}", e.render());
+            return EXIT_USAGE;
+        }
+        Ok(c) => c,
+    };
+    let p = match provider::Provider::new(&cfg, None, None) {
+        Err(e) => {
+            eprintln!("curam: {}", e.msg);
+            return EXIT_PROVIDER;
+        }
+        Ok(x) => x,
+    };
+    let mut jj = match journal::Journal::open(
+        config::expand_home(cfg.journal.path.as_str()),
+        None,
+    ) {
+        Err(e) => {
+            eprintln!("curam: {e}");
+            return EXIT_ERROR;
+        }
+        Ok(x) => x,
+    };
+    let b = budget::Budget::from_cfg(&cfg.budget);
+    let mut a = agent::Agent::new(
+        &cfg,
+        p,
+        b,
+        cfg.workdir.clone(),
+        false,
+        !quiet && cfg.ui.show_thinking,
+        !quiet && cfg.ui.show_commands,
+        false,
     );
-    EXIT_ERROR
+    match a.run_task(task.as_str(), &mut jj) {
+        Err(e) => {
+            eprintln!("curam: {e}");
+            return EXIT_ERROR;
+        }
+        Ok(ans) => {
+            if let Some(text) = ans {
+                println!("{}", text);
+            }
+        }
+    }
+    EXIT_OK
 }
 
 fn cmd_init(_loader: &config::Loader, dir: &Option<String>) -> i32 {
@@ -199,6 +247,13 @@ fn cmd_init(_loader: &config::Loader, dir: &Option<String>) -> i32 {
     }
 }
 
+fn split_key_value(kv: &str) -> (&str, &str) {
+    match kv.find('=') {
+        Some(i) => (&kv[0..i], &kv[i + 1..]),
+        None => (kv, ""),
+    }
+}
+
 fn cmd_config(
     loader: &config::Loader,
     show: &bool,
@@ -206,7 +261,6 @@ fn cmd_config(
     path: &bool,
     set: &Option<String>,
 ) -> i32 {
-    // --set writes to the project file and is independent of loading.
     if let Some(kv) = set {
         let (key, value) = split_key_value(kv.as_str());
         let project = std::path::PathBuf::from("curam.toml");
@@ -248,17 +302,9 @@ fn cmd_config(
     EXIT_OK
 }
 
-/// Split "key.path=value" on the first '='.
-fn split_key_value(kv: &str) -> (&str, &str) {
-    match kv.find('=') {
-        Some(i) => (&kv[0..i], &kv[i + 1..]),
-        None => (kv, ""),
-    }
-}
-
 fn cmd_doctor(loader: &config::Loader) -> i32 {
-    let loaded = loader.load();
-    match loaded {
+    let cfg = loader.load();
+    match cfg {
         Err(e) => {
             eprintln!("{}", e.render());
             return EXIT_USAGE;
