@@ -121,7 +121,7 @@ fn err<T>(key: String, msg: impl Into<String>) -> Result<T, ConfigError> {
 }
 
 /// The effective configuration — typed, with provenance for the CLI.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub default_provider: String,
     pub providers: Vec<ProviderCfg>,
@@ -165,7 +165,7 @@ pub struct ProviderCfg {
     pub stream: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BudgetCfg {
     pub cap_usd: f64,
     pub price_per_mtok: Vec<(String, f64)>,
@@ -178,7 +178,7 @@ pub struct PiiCfg {
     pub internal_domains: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ClassifierCfg {
     pub enabled: bool,
     pub model: String,
@@ -193,7 +193,7 @@ pub struct UiCfg {
     pub time_format: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ToolsCfg {
     pub shell: bool,
     pub run: bool,
@@ -218,7 +218,7 @@ pub struct CageCfg {
     pub fallback: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AgentCfg {
     pub system_prompt: String,
     pub skills_dir: String,
@@ -235,7 +235,7 @@ pub struct PolicyRulesCfg {
     pub deny: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct JournalCfg {
     pub path: String,
     pub keep: String,

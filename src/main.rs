@@ -7,19 +7,27 @@
 //! Roadmap: docs/rust-harness-plan.md in the curam-harness repo.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use crossterm::tty::IsTty;
+use std::io::stdin;
+use std::io::stdout;
+
+mod budget;
+mod provider;
+use budget::Budget;
+use provider::Provider;
 
 mod agent;
 mod ask;
-mod budget;
 mod cage;
 mod config;
 mod doctor;
 mod journal;
 mod policy;
-mod provider;
+mod repl;
 mod sanitize;
 mod sli;
 mod tools;
+mod tui;
 mod ui;
 mod util;
 
@@ -53,6 +61,14 @@ struct Cli {
     /// Suppress realtime output (scripts, CI)
     #[arg(short, long)]
     quiet: bool,
+
+    /// Force plain output even on a tty (no full-screen TUI)
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Disable SSE streaming (single request/response, block output)
+    #[arg(long)]
+    no_stream: bool,
 
     /// Color output mode
     #[arg(long, value_enum, default_value_t = Color::Auto)]
@@ -155,15 +171,9 @@ fn run(cli: &Cli) -> i32 {
     let loader = config::Loader::new(cli.config.clone(), cli.db.clone());
     match &cli.command {
         None => {
-            // No subcommand: either a one-shot task or nothing.
+            // No subcommand: a one-shot task, or the TUI/REPL entry.
             if cli.task.is_empty() {
-                println!(
-                    "curam {} — zero-trust coding agent harness",
-                    env!("CARGO_PKG_VERSION")
-                );
-                println!("No task given. Run  curam \"<describe the task>\"  or  curam --help");
-                println!("(the TUI/REPL land in H5)");
-                return EXIT_OK;
+                return auto_entry(&loader, cli);
             }
             one_shot(&loader, cli.task.join(" "), cli.quiet)
         }
@@ -176,7 +186,91 @@ fn run(cli: &Cli) -> i32 {
         }) => cmd_config(&loader, show, validate, path, set),
         Some(Commands::Doctor) => cmd_doctor(&loader),
         Some(Commands::Sli) => cmd_sli(&loader),
+        Some(Commands::Tui) => run_tui(&loader, cli.no_stream),
+        Some(Commands::Repl) => run_repl(&loader, cli.quiet, cli.no_stream),
         Some(cmd) => not_yet(cmd),
+    }
+}
+
+/// Auto-entry: the TUI is the default when a task-free interactive tty
+/// supports it (TERM set and sane); otherwise the plain REPL takes over.
+fn auto_entry(loader: &config::Loader, cli: &Cli) -> i32 {
+    let tty_ok = stdout().is_tty() && stdin().is_tty();
+    let term: String = std::env::var_os("TERM")
+        .map(|p| {
+            std::path::PathBuf::from(p)
+                .to_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let term_ok = !term.is_empty() && term != "dumb";
+    if tty_ok && term_ok {
+        let parts = build_parts(loader, cli.no_stream);
+        match parts {
+            Err(code) => code,
+            Ok(r) => tui::run(r.cfg, r.p, r.b, r.workdir, r.journal_path),
+        }
+    } else {
+        run_repl(loader, cli.quiet, cli.no_stream)
+    }
+}
+
+struct RunParts {
+    cfg: config::Config,
+    p: Provider,
+    b: Budget,
+    workdir: std::path::PathBuf,
+    journal_path: std::path::PathBuf,
+}
+
+/// Shared setup for one-shot / repl / tui: config + provider + budget +
+/// journal path, with the same loud error mapping everywhere.
+fn build_parts(loader: &config::Loader, no_stream: bool) -> Result<RunParts, i32> {
+    let mut cfg = match loader.load() {
+        Err(e) => {
+            eprintln!("{}", e.render());
+            return Err(EXIT_USAGE);
+        }
+        Ok(c) => c,
+    };
+    if no_stream {
+        for p in &mut cfg.providers {
+            p.stream = false;
+        }
+    }
+    let p = match Provider::new(&cfg, None, None) {
+        Err(e) => {
+            eprintln!("curam: {}", e.msg);
+            return Err(EXIT_PROVIDER);
+        }
+        Ok(x) => x,
+    };
+    let b = Budget::from_cfg(&cfg.budget);
+    let workdir = cfg.workdir.clone();
+    let journal_path = config::expand_home(cfg.journal.path.as_str());
+    Ok(RunParts {
+        cfg,
+        p,
+        b,
+        workdir,
+        journal_path,
+    })
+}
+
+fn run_tui(loader: &config::Loader, no_stream: bool) -> i32 {
+    let parts = build_parts(loader, no_stream);
+    match parts {
+        Err(code) => code,
+        Ok(r) => tui::run(r.cfg, r.p, r.b, r.workdir, r.journal_path),
+    }
+}
+
+fn run_repl(loader: &config::Loader, quiet: bool, no_stream: bool) -> i32 {
+    let parts = build_parts(loader, no_stream);
+    match parts {
+        Err(code) => code,
+        Ok(r) => repl::run(r.cfg, r.p, r.b, r.workdir, r.journal_path, quiet),
     }
 }
 

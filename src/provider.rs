@@ -75,7 +75,7 @@ impl ChatMessage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Provider {
     pub name: String,
     pub base_url: String,
@@ -203,7 +203,7 @@ fn emit_sse_line(line: &str, tx: &mpsc::Sender<StreamChunk>) {
         kind: "delta".into(),
         text: chunk_content(payload),
     })
-        .ok();
+    .ok();
 }
 
 impl Provider {
@@ -327,7 +327,11 @@ impl Provider {
         let url = format!("{}/chat/completions", self.base_url);
         let (tx, rx) = mpsc::channel::<StreamChunk>();
         let cancel = Arc::new(AtomicBool::new(false));
-        let mode: String = if self.stream { "stream".into() } else { "plain".into() };
+        let mode: String = if self.stream {
+            "stream".into()
+        } else {
+            "plain".into()
+        };
         let base_url: String = self.base_url.clone();
         let api_key: Option<String> = self.api_key.clone();
         let agent = self.agent.clone();
@@ -336,7 +340,9 @@ impl Provider {
         let mode_owned: String = mode;
         let cancel_shared: Arc<AtomicBool> = cancel.clone();
         thread::spawn(move || {
-            let mut req = agent.post(url_owned).header("Content-Type", "application/json");
+            let mut req = agent
+                .post(url_owned)
+                .header("Content-Type", "application/json");
             if let Some(k) = &api_key {
                 req = req.header("Authorization", format!("Bearer {}", k));
             }
@@ -344,19 +350,15 @@ impl Provider {
                 kind: "info".into(),
                 text: mode_owned.clone(),
             })
-                .ok();
+            .ok();
             let mut resp = match req.send(body_owned) {
                 Ok(r) => r,
                 Err(e) => {
                     tx.send(StreamChunk {
                         kind: "error".into(),
-                        text: format!(
-                            "provider unreachable ({}): {}",
-                            base_url, e
-                        )
-                        .to_string(),
+                        text: format!("provider unreachable ({}): {}", base_url, e).to_string(),
                     })
-                        .ok();
+                    .ok();
                     return;
                 }
             };
@@ -370,13 +372,9 @@ impl Provider {
                 };
                 tx.send(StreamChunk {
                     kind: "error".into(),
-                    text: format!(
-                        "provider error {} ({}): {}",
-                        status, base_url, head
-                    )
-                    .to_string(),
+                    text: format!("provider error {} ({}): {}", status, base_url, head).to_string(),
                 })
-                    .ok();
+                .ok();
                 return;
             }
             let mut rd = resp.body_mut().with_config().reader();
@@ -391,7 +389,7 @@ impl Provider {
                         kind: "cancelled".into(),
                         text: String::new(),
                     })
-                        .ok();
+                    .ok();
                     return;
                 }
                 match rd.read(&mut buf) {
@@ -414,9 +412,7 @@ impl Provider {
                                 whole += text.as_str();
                                 if stream {
                                     full += text.as_str();
-                                    let parts: Vec<&str> = full
-                                        .split('\n')
-                                        .collect::<Vec<&str>>();
+                                    let parts: Vec<&str> = full.split('\n').collect::<Vec<&str>>();
                                     if parts.len() > 1 {
                                         for k in 0..(parts.len() - 1) {
                                             emit_sse_line(parts[k], &tx);
@@ -432,13 +428,9 @@ impl Provider {
                     Err(e) => {
                         tx.send(StreamChunk {
                             kind: "error".into(),
-                            text: format!(
-                                "provider read error ({}): {}",
-                                base_url, e
-                            )
-                            .to_string(),
+                            text: format!("provider read error ({}): {}", base_url, e).to_string(),
                         })
-                            .ok();
+                        .ok();
                         return;
                     }
                 }
@@ -452,13 +444,13 @@ impl Provider {
                     kind: "delta".into(),
                     text: whole.clone(),
                 })
-                    .ok();
+                .ok();
             }
             tx.send(StreamChunk {
                 kind: "done".into(),
                 text: whole.clone(),
             })
-                .ok();
+            .ok();
         });
         Ok(ChatStream { cancel, rx })
     }
@@ -758,7 +750,7 @@ mod tests {
         sse.push_str("data: [DONE]\n");
         let url = serve_staged(
             &sse[0..sse.len() - 12].to_string(), // first two lines
-            &sse[sse.len() - 12..].to_string(), // "[DONE]\n"
+            &sse[sse.len() - 12..].to_string(),  // "[DONE]\n"
             30,
         );
         let p = Provider::new(&sse_cfg(url), None, None).unwrap();
@@ -789,9 +781,15 @@ mod tests {
                 }
             }
         }
-        assert_eq!(kinds.iter().filter(|k| k.as_str() == "delta").count() >= 2, true);
+        assert_eq!(
+            kinds.iter().filter(|k| k.as_str() == "delta").count() >= 2,
+            true
+        );
         assert_eq!(deltas.join(""), "Hello");
-        assert_eq!(assemble_sse(full.as_str()).unwrap().content.unwrap(), "Hello");
+        assert_eq!(
+            assemble_sse(full.as_str()).unwrap().content.unwrap(),
+            "Hello"
+        );
     }
 
     #[test]
@@ -826,7 +824,10 @@ mod tests {
             body.len(),
             "reader must deliver the exact body: {full}"
         );
-        assert_eq!(parse_chat_json(full.as_str()).unwrap().content.unwrap(), "hello there");
+        assert_eq!(
+            parse_chat_json(full.as_str()).unwrap().content.unwrap(),
+            "hello there"
+        );
     }
 
     #[test]

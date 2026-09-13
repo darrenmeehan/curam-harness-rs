@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::config::BudgetCfg;
 use super::journal::Journal;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Budget {
     pub cap_usd: f64,
     prices: Vec<(String, f64)>,

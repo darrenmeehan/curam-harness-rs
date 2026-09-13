@@ -17,8 +17,8 @@ use super::config;
 use super::config::{PolicyRulesCfg, RunCfg};
 use super::journal::Journal;
 use super::policy;
-use super::provider::{ApiMessage, ChatMessage, Provider, ProviderError, Usage};
 use super::provider::{assemble_sse, parse_chat_json};
+use super::provider::{ApiMessage, ChatMessage, Provider, ProviderError, Usage};
 use super::sanitize::Sanitizer;
 use super::tools as toolmod;
 use super::ui;
@@ -153,6 +153,24 @@ impl Agent {
         }
     }
 
+    /// Status accessors for the REPL/status lines (the agent owns the
+    /// provider + budget instances).
+    pub fn provider_name(&self) -> &str {
+        self.provider.name.as_str()
+    }
+
+    pub fn model(&self) -> &str {
+        self.provider.model.as_str()
+    }
+
+    pub fn spend(&self) -> f64 {
+        self.budget.spent_usd
+    }
+
+    pub fn cap(&self) -> f64 {
+        self.budget.cap_usd
+    }
+
     /// Run one task to completion (or the iteration cap), journaling every
     /// step. Returns the final answer (None when the run bailed on a
     /// provider error).
@@ -224,7 +242,9 @@ impl Agent {
                         let spent = round4(self.budget.spent_usd);
                         let _ = b.send(
                             "status",
-                            format!("cost=${:.2} spent=${}", cost, spent).to_string().as_str(),
+                            format!("cost=${:.2} spent=${}", cost, spent)
+                                .to_string()
+                                .as_str(),
                         );
                     }
 
@@ -298,12 +318,9 @@ impl Agent {
                             );
                         }
                         if let Some(b) = &self.ui_bus {
-                            let rj = serde_json::to_string(&result)
-                                .expect("result json");
-                            let _ = b.send(
-                                "result",
-                                format!("{} {}", tc.name, rj).to_string().as_str(),
-                            );
+                            let rj = serde_json::to_string(&result).expect("result json");
+                            let _ = b
+                                .send("result", format!("{} {}", tc.name, rj).to_string().as_str());
                         }
 
                         // stuck detection: N identical consecutive calls
@@ -388,9 +405,7 @@ impl Agent {
                     if let Some(b) = &self.ui_bus {
                         if b.cancelled() {
                             cs.cancel();
-                            return Err(ProviderError::new(
-                                "cancelled by user".into(),
-                            ));
+                            return Err(ProviderError::new("cancelled by user".into()));
                         }
                     }
                     match cs.wait(40) {
@@ -408,9 +423,7 @@ impl Agent {
                                 break;
                             }
                             "cancelled" => {
-                                return Err(ProviderError::new(
-                                    "cancelled by user".into(),
-                                ));
+                                return Err(ProviderError::new("cancelled by user".into()));
                             }
                             "error" => {
                                 return Err(ProviderError::new(ch.text.clone()));
@@ -419,12 +432,11 @@ impl Agent {
                         },
                     }
                 }
-                let mut parsed: Result<ChatMessage, ProviderError> =
-                    if mode == "stream" {
-                        assemble_sse(body.as_str())
-                    } else {
-                        parse_chat_json(body.as_str())
-                    };
+                let mut parsed: Result<ChatMessage, ProviderError> = if mode == "stream" {
+                    assemble_sse(body.as_str())
+                } else {
+                    parse_chat_json(body.as_str())
+                };
                 // Lenient fallback: a provider that answers plain JSON to a
                 // stream request must not turn into an empty turn.
                 if mode == "stream" {
@@ -469,12 +481,7 @@ impl Agent {
                 journal
                     .log(
                         "approval_granted",
-                        &Value::Object(mapof2(
-                            "command",
-                            cmd.into(),
-                            "reason",
-                            reason.into(),
-                        )),
+                        &Value::Object(mapof2("command", cmd.into(), "reason", reason.into())),
                     )
                     .ok();
                 return true;
@@ -482,26 +489,19 @@ impl Agent {
             journal
                 .log(
                     "approval_requested",
-                    &Value::Object(mapof2(
-                        "command",
-                        cmd.into(),
-                        "reason",
-                        reason.into(),
-                    )),
+                    &Value::Object(mapof2("command", cmd.into(), "reason", reason.into())),
                 )
                 .ok();
             let question = format!("{cmd}\n{reason}").to_string();
             let answer = b.ask(question.as_str());
-            if answer.map(|a| a == "yes" || a == "allow" || a == "y").unwrap_or(false) {
+            if answer
+                .map(|a| a == "yes" || a == "allow" || a == "y")
+                .unwrap_or(false)
+            {
                 journal
                     .log(
                         "approval_granted",
-                        &Value::Object(mapof2(
-                            "command",
-                            cmd.into(),
-                            "reason",
-                            reason.into(),
-                        )),
+                        &Value::Object(mapof2("command", cmd.into(), "reason", reason.into())),
                     )
                     .ok();
                 true
@@ -928,7 +928,10 @@ mod tests {
                 .expect("json")
                 .contains("cancelled")
         });
-        assert!(cancelled, "cancel surfaces as a journaled error, not a hang");
+        assert!(
+            cancelled,
+            "cancel surfaces as a journaled error, not a hang"
+        );
         assert_eq!(j2.events(Some("model_message")).unwrap().len(), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1008,7 +1011,9 @@ mod tests {
         let asks = j2.events(Some("ask_human")).unwrap();
         assert_eq!(asks.len(), 1);
         assert!(
-            serde_json::to_string(&asks[0].payload).expect("json").contains("red"),
+            serde_json::to_string(&asks[0].payload)
+                .expect("json")
+                .contains("red"),
             "the human answer is journaled"
         );
         std::fs::remove_dir_all(&dir).ok();

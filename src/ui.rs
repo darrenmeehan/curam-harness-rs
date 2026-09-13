@@ -34,7 +34,10 @@ impl UiBus {
     /// Emit one event; false when the UI died (its receiver dropped).
     pub fn send(&self, kind: &str, text: &str) -> bool {
         self.tx
-            .send(UiEv { kind: kind.into(), text: text.into() })
+            .send(UiEv {
+                kind: kind.into(),
+                text: text.into(),
+            })
             .is_ok()
     }
 
