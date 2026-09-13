@@ -10,12 +10,17 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use super::ask;
 use super::budget::Budget;
+use super::cage::Cage;
 use super::config;
+use super::config::{PolicyRulesCfg, RunCfg};
 use super::journal::Journal;
+use super::policy;
 use super::provider::{ApiMessage, Provider, Usage};
 use super::sanitize::Sanitizer;
 use super::tools as toolmod;
+use super::util::{mapof, mapof2};
 
 pub const MAX_ITERATIONS: usize = 25;
 pub const STUCK_THRESHOLD: usize = 3;
@@ -96,7 +101,11 @@ fn ok_false(error: &str) -> Value {
 pub struct Agent {
     pub workdir: PathBuf,
     provider: Provider,
+    cage: Cage,
     budget: Budget,
+    policy_rules: PolicyRulesCfg,
+    run_cfg: RunCfg,
+    fallback_raw: bool,
     sanitizer: Sanitizer,
     pub interactive: bool,
     pub show_thinking: bool,
@@ -119,7 +128,11 @@ impl Agent {
         Self {
             workdir,
             provider,
+            cage: Cage::from_cfg(&cfg.cage),
             budget,
+            policy_rules: cfg.policy_rules.clone(),
+            run_cfg: cfg.run.clone(),
+            fallback_raw: cfg.cage.fallback == "raw",
             sanitizer: Sanitizer::from_cfg(&cfg.pii),
             interactive,
             show_thinking,
@@ -331,29 +344,177 @@ impl Agent {
     /// Tool dispatch with policy gating — the only exec path (H3: file tools;
     /// shell/run/ask/skills land in later phases).
     fn execute_tool(&mut self, name: &str, args: &Value, journal: &mut Journal) -> Value {
-        let _ = journal; // ask/verdict journaling lands in H4
         match name {
             "read" | "write" | "edit" => toolmod::run(&self.workdir, name, args),
-            "shell" => ok_false("shell lands in H4 (caged) — not available yet"),
-            "run" => ok_false("typed run lands in H4 — not available yet"),
-            "ask_human" => ok_false("ask layer lands in H4 — not available yet"),
+            "shell" => self.tool_shell(args, journal),
+            "run" => self.tool_run(args, journal),
+            "ask_human" => self.tool_ask_human(args, journal),
             "use_skill" => ok_false("skills land in H6 — not available yet"),
             _ => toolmod::run(&self.workdir, name, args),
         }
     }
+
+    fn denied(reason: &str) -> Value {
+        let mut m = mapof("ok", false.into());
+        m.insert("denied".to_owned(), true.into());
+        m.insert("reason".to_owned(), reason.into());
+        serde_json::Value::Object(m)
+    }
+
+    /// Approval gate: hard for policy-ask commands. Non-interactive without
+    /// auto_grant denies (POC parity); auto_grant auto-allows.
+    fn approve(&mut self, cmd: &str, reason: &str, journal: &mut Journal) -> bool {
+        if !self.interactive && !self.auto_grant {
+            let _ = journal;
+            return false;
+        }
+        let grant = if self.auto_grant { Some(true) } else { None };
+        ask::ask_approval(journal, cmd, reason, grant).unwrap_or(false)
+    }
+
+    /// shell: policy gate → approval → the cage. Verdict chains land in the
+    /// journal as tool_verdicts (provable audibility).
+    fn tool_shell(&mut self, args: &Value, journal: &mut Journal) -> Value {
+        let cmd = args.get("command").and_then(|c| c.as_str());
+        match cmd {
+            None => ok_false("missing command"),
+            Some(cmd) => {
+                let verdict = policy::check(cmd, &self.policy_rules);
+                match verdict.action.as_str() {
+                    "deny" => {
+                        let _ = journal.log("tool_denied", &Value::Object(mapof2(
+                            "command", cmd.into(),
+                            "reason", verdict.evidence.clone().into(),
+                        )));
+                        return Self::denied(format!("{} (denied by policy: {})", cmd, verdict.evidence).as_str());
+                    }
+                    "ask"
+                        if !self.approve(cmd, verdict.evidence.as_str(), journal) => {
+                            let _ = journal.log("tool_denied", &Value::Object(mapof2(
+                                "command", cmd.into(),
+                                "reason", "non-interactive auto-deny".into(),
+                            )));
+                            return Self::denied("human denied");
+                        }
+                    _ => {}
+                }
+                let binds = toolmod::writable_binds(&self.workdir);
+                let result = toolmod::tool_shell(
+                    &self.workdir,
+                    args,
+                    &self.cage,
+                    true,
+                    &binds,
+                    self.run_cfg.default_timeout_s,
+                    self.fallback_raw,
+                );
+                match result {
+                    Err(e) => ok_false(format!("cage error: {e}").as_str()),
+                    Ok(v) => {
+                        journal_verdicts(journal, args, &v);
+                        v
+                    }
+                }
+            }
+        }
+    }
+
+    /// run: typed exec (argv array) checked against the [run] tables.
+    fn tool_run(&mut self, args: &Value, journal: &mut Journal) -> Value {
+        let program = args.get("program").and_then(|p| p.as_str());
+        match program {
+            None => ok_false("missing program"),
+            Some(program) => {
+                let mut words = vec![program.to_string()];
+                if let Some(argv) = args.get("argv").and_then(|a| a.as_array()) {
+                    for a in argv.iter() {
+                        if let Some(tok) = a.as_str() {
+                            words.push(tok.to_string());
+                        }
+                    }
+                }
+                let joined = words.join(" ");
+                let verdict = curam_core::classify_rules(
+                    joined.as_str(),
+                    Some(self.run_cfg.allow_programs.clone()),
+                    Some(self.run_cfg.ask_programs.clone()),
+                    Some(self.run_cfg.deny_programs.clone()),
+                );
+                match verdict.action.as_str() {
+                    "deny" => {
+                        let _ = journal.log("tool_denied", &Value::Object(mapof2(
+                            "command", joined.clone().into(),
+                            "reason", verdict.evidence.clone().into(),
+                        )));
+                        return Self::denied(format!("{} (denied by policy: {})", joined, verdict.evidence).as_str());
+                    }
+                    "ask"
+                        if !self.approve(joined.as_str(), verdict.evidence.as_str(), journal) => {
+                            let _ = journal.log("tool_denied", &Value::Object(mapof2(
+                                "command", joined.clone().into(),
+                                "reason", "non-interactive auto-deny".into(),
+                            )));
+                            return Self::denied("human denied");
+                        }
+                    _ => {}
+                }
+                let result = toolmod::tool_run(
+                    &self.workdir,
+                    args,
+                    &self.cage,
+                    self.run_cfg.default_net,
+                    self.run_cfg.default_timeout_s,
+                    self.fallback_raw,
+                );
+                match result {
+                    Err(e) => ok_false(format!("cage error: {e}").as_str()),
+                    Ok(v) => {
+                        journal_verdicts(journal, args, &v);
+                        v
+                    }
+                }
+            }
+        }
+    }
+
+    /// ask_human: judgment via the ask layer (non-interactive answers
+    /// without prompting, POC parity).
+    fn tool_ask_human(&mut self, args: &Value, journal: &mut Journal) -> Value {
+        let q = args.get("question").and_then(|x| x.as_str()).unwrap_or_default();
+        let answer = if !self.interactive && !self.auto_grant {
+            Some("(non-interactive: no human)".into())
+        } else if self.auto_grant {
+            Some("1".into())
+        } else {
+            None
+        };
+        let ans = ask::ask_judgment(journal, q, None, answer).unwrap_or("(no reply)".into());
+        serde_json::Value::Object(mapof2("ok", true.into(), "answer", ans.into()))
+    }
 }
 
-pub fn mapof(k: &str, v: Value) -> serde_json::Map<String, Value> {
-    let mut m = serde_json::Map::new();
-    m.insert(k.to_owned(), v);
-    m
+/// Port of agent.py _journal_verdicts: cage/verdict chains for shell/run.
+fn journal_verdicts(journal: &mut Journal, args: &Value, result: &Value) {
+    if result.get("verdicts").is_none() && result.get("cages").is_none() {
+        return;
+    }
+    let mut payload = mapof("command", serde_json::to_string(args).expect("args json").into());
+    if let Some(vs) = result.get("verdicts").and_then(|v| v.as_array()) {
+        if !vs.is_empty() {
+            payload.insert("verdicts".to_owned(), vs.clone().into());
+        }
+    }
+    if let Some(c) = result.get("cages").and_then(|v| v.as_array()) {
+        payload.insert("cages".to_owned(), c.clone().into());
+    }
+    if result.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+        payload.insert("timed_out".to_owned(), true.into());
+    }
+    if payload.len() > 1 {
+        let _ = journal.log("tool_verdicts", &serde_json::Value::Object(payload));
+    }
 }
 
-pub fn mapof2(k1: &str, v1: Value, k2: &str, v2: Value) -> serde_json::Map<String, Value> {
-    let mut m = mapof(k1, v1);
-    m.insert(k2.to_owned(), v2);
-    m
-}
 
 #[cfg(test)]
 mod tests {
@@ -508,6 +669,54 @@ mod tests {
             let found = kinds.iter().any(|k| k == want);
             assert!(found, "missing journal event {want}");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shell_denied_by_policy_never_reaches_the_cage() {
+        let dir = tmp_dir("deny");
+        let call = r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"rm -rf /\"}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":3}}"#;
+        let answer = r#"{"choices":[{"message":{"role":"assistant","content":"Blocked as expected."}}],"usage":{"prompt_tokens":8,"completion_tokens":2}}"#;
+        let url = scripted(vec![call.into(), answer.into()], &dir.join("bodies.txt"));
+        let mut cfg = test_cfg(url);
+        // The cage binary is missing — policy DENY must stop the command first.
+        cfg.cage.binary = "/nonexistent/curam-run".into();
+        let mut a = agent_for(&cfg, &dir);
+        let mut j = Journal::open(dir.join("j.db"), Some("sess".into())).unwrap();
+
+        let ans = a.run_task("remove root", &mut j).unwrap();
+        assert!(ans.unwrap().contains("Blocked as expected"));
+
+        let ds = j.events(Some("tool_denied")).unwrap();
+        assert_eq!(ds.len(), 1);
+        assert!(serde_json::to_string(&ds[0].payload).expect("json").contains("rm -rf /"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn shell_runs_through_the_cage_and_journals_verdicts() {
+        let dir = tmp_dir("cage");
+        // Resolve the real cage binary from the default config first; skip
+        // when this machine has no curam-run build (CI portability guard).
+        let default_cfg = config::Loader::new(None, None).load().unwrap();
+        let cage = Cage::from_cfg(&default_cfg.cage);
+        if !cage.available() {
+            return;
+        }
+        let call = r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"shell","arguments":"{\"command\":\"echo caged-ok\"}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":3}}"#;
+        let answer = r#"{"choices":[{"message":{"role":"assistant","content":"Cage says caged-ok."}}],"usage":{"prompt_tokens":8,"completion_tokens":2}}"#;
+        let url = scripted(vec![call.into(), answer.into()], &dir.join("bodies.txt"));
+        let cfg = test_cfg(url);
+        let mut a = agent_for(&cfg, &dir);
+        let mut j = Journal::open(dir.join("j.db"), Some("sess".into())).unwrap();
+
+        let ans = a.run_task("say it", &mut j).unwrap();
+        assert!(ans.unwrap().contains("Cage says caged-ok"));
+
+        // The cage verdict chain is in the journal (tool_verdicts).
+        let vs = j.events(Some("tool_verdicts")).unwrap();
+        assert_eq!(vs.len(), 1, "cage layers must be journaled");
+        assert!(serde_json::to_string(&vs[0].payload).expect("json").contains("bwrap"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -171,7 +171,7 @@ pub struct BudgetCfg {
     pub price_per_mtok: Vec<(String, f64)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PiiCfg {
     pub level: String,
     pub placeholder: String,
@@ -184,7 +184,7 @@ pub struct ClassifierCfg {
     pub model: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UiCfg {
     pub theme: String,
     pub show_thinking: bool,
@@ -201,7 +201,7 @@ pub struct ToolsCfg {
     pub timeout_default_s: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RunCfg {
     pub default_net: bool,
     pub default_timeout_s: u64,
@@ -210,7 +210,7 @@ pub struct RunCfg {
     pub deny_programs: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CageCfg {
     pub binary: String,
     pub lists_dir: String,
@@ -228,7 +228,7 @@ pub struct AgentCfg {
     pub stuck_threshold: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PolicyRulesCfg {
     pub allow: Vec<String>,
     pub ask: Vec<String>,

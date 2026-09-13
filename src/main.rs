@@ -9,7 +9,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod agent;
+mod ask;
 mod budget;
+mod cage;
 mod config;
 mod doctor;
 mod journal;
@@ -18,6 +20,7 @@ mod provider;
 mod sanitize;
 mod sli;
 mod tools;
+mod util;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
