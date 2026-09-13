@@ -43,7 +43,12 @@ impl Budget {
 
     /// Record a completion's token usage; returns the cost in USD. Emits the
     /// `cost` event (or `cost_unknown` when usage is missing).
-    pub fn charge(&mut self, model: &str, usage: &Value, journal: &mut Journal) -> Result<f64, String> {
+    pub fn charge(
+        &mut self,
+        model: &str,
+        usage: &Value,
+        journal: &mut Journal,
+    ) -> Result<f64, String> {
         let pt = usage.get("prompt_tokens").and_then(|v| v.as_u64());
         let ct = usage.get("completion_tokens").and_then(|v| v.as_u64());
         if pt.is_none() || ct.is_none() {
@@ -62,7 +67,10 @@ impl Budget {
         m.insert("prompt_tokens".to_owned(), pt.into());
         m.insert("completion_tokens".to_owned(), ct.into());
         m.insert("cost_usd".to_owned(), round6(cost).into());
-        m.insert("session_total_usd".to_owned(), round6(self.spent_usd).into());
+        m.insert(
+            "session_total_usd".to_owned(),
+            round6(self.spent_usd).into(),
+        );
         journal.log("cost", &serde_json::Value::Object(m))?;
         Ok(cost)
     }
@@ -89,11 +97,14 @@ mod tests {
 
     #[test]
     fn charge_accounts_real_cost() {
-        let dir = std::env::temp_dir().join("curam-h2-b").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h2-b")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut j = Journal::open(dir.join("j.db"), None).unwrap();
         let mut b = Budget::from_cfg(&budget_cfg(1.0));
-        let usage = serde_json::from_str("{\"prompt_tokens\":500000,\"completion_tokens\":500000}").unwrap();
+        let usage = serde_json::from_str("{\"prompt_tokens\":500000,\"completion_tokens\":500000}")
+            .unwrap();
         let cost = b.charge("gpt-4o", &usage, &mut j).unwrap();
         assert_eq!(cost, 2.5);
         assert!(b.over_budget(), "2.5 > 1.0 cap");
@@ -103,11 +114,14 @@ mod tests {
 
     #[test]
     fn unknown_model_is_free() {
-        let dir = std::env::temp_dir().join("curam-h2-c").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h2-c")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut j = Journal::open(dir.join("j.db"), None).unwrap();
         let mut b = Budget::from_cfg(&budget_cfg(1.0));
-        let usage = serde_json::from_str("{\"prompt_tokens\":100,\"completion_tokens\":100}").unwrap();
+        let usage =
+            serde_json::from_str("{\"prompt_tokens\":100,\"completion_tokens\":100}").unwrap();
         assert_eq!(b.charge("local-model", &usage, &mut j).unwrap(), 0.0);
         assert_eq!(b.spent_usd, 0.0);
         assert!(!b.over_budget());
@@ -116,7 +130,9 @@ mod tests {
 
     #[test]
     fn missing_usage_is_tracked_not_silent() {
-        let dir = std::env::temp_dir().join("curam-h2-d").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h2-d")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut j = Journal::open(dir.join("j.db"), None).unwrap();
         let mut b = Budget::from_cfg(&budget_cfg(1.0));

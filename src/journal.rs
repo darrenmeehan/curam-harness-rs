@@ -6,7 +6,7 @@
 //! the human-readable view. The schema matches journal.py exactly, so
 //! existing POC journals are readable as-is (the H2 resumability gate).
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -69,9 +69,14 @@ impl Journal {
             .map_err(|e| format!("journal WAL pragma: {e}"))?;
         conn.execute_batch("PRAGMA synchronous=NORMAL;")
             .map_err(|e| format!("journal synchronous pragma: {e}"))?;
-        conn.execute_batch(SCHEMA).map_err(|e| format!("journal schema: {e}"))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| format!("journal schema: {e}"))?;
         let sid = session_id.unwrap_or_else(fresh_session_id);
-        Ok(Self { path, session_id: sid, conn })
+        Ok(Self {
+            path,
+            session_id: sid,
+            conn,
+        })
     }
 
     /// Append one event. Returns the rowid (like journal.py's lastrowid).
@@ -89,37 +94,40 @@ impl Journal {
 
     /// All events, optionally filtered by type, in write order.
     pub fn events(&mut self, etype: Option<&str>) -> Result<Vec<EventRow>, String> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare("SELECT seq, session_id, ts, etype, payload FROM events ORDER BY seq")
             .map_err(|e| format!("journal query: {e}"))?;
-        let mut rows = stmt.query(params!()).map_err(|e| format!("journal query: {e}"))?;
+        let mut rows = stmt
+            .query(params!())
+            .map_err(|e| format!("journal query: {e}"))?;
         let mut out = Vec::new();
         let mut iter_done = false;
         while !iter_done {
             let row = rows.next();
             match row {
                 Ok(Some(r)) => {
-            let seq = r.get::<usize, i64>(0).unwrap_or_default();
-            let sid = r.get::<usize, String>(1).unwrap_or_default();
-            let ts = r.get::<usize, f64>(2).unwrap_or_default();
-            let et = r.get::<usize, String>(3).unwrap_or_default();
-            if let Some(want) = etype {
-                if et != want {
-                    continue;
-                }
-            }
-            let raw = r.get::<usize, String>(4).unwrap_or_default();
-            let payload = match serde_json::from_str(raw.as_str()) {
-                Ok(v) => v,
-                Err(_) => serde_json::Value::Null, // tolerate a bad row; never crash
-            };
-            out.push(EventRow {
-                seq: seq as u64,
-                session_id: sid,
-                ts,
-                etype: et,
-                payload,
-            });
+                    let seq = r.get::<usize, i64>(0).unwrap_or_default();
+                    let sid = r.get::<usize, String>(1).unwrap_or_default();
+                    let ts = r.get::<usize, f64>(2).unwrap_or_default();
+                    let et = r.get::<usize, String>(3).unwrap_or_default();
+                    if let Some(want) = etype {
+                        if et != want {
+                            continue;
+                        }
+                    }
+                    let raw = r.get::<usize, String>(4).unwrap_or_default();
+                    let payload = match serde_json::from_str(raw.as_str()) {
+                        Ok(v) => v,
+                        Err(_) => serde_json::Value::Null, // tolerate a bad row; never crash
+                    };
+                    out.push(EventRow {
+                        seq: seq as u64,
+                        session_id: sid,
+                        ts,
+                        etype: et,
+                        payload,
+                    });
                 }
                 Ok(None) => iter_done = true,
                 Err(e) => return Err(format!("journal iterate: {e}")),
@@ -138,9 +146,11 @@ impl Journal {
             m.insert("seq".to_owned(), e.seq.into());
             m.insert("ts".to_owned(), e.ts.into());
             m.insert("etype".to_owned(), e.etype.into());
-            if let Some(obj) = e.payload.as_object() { for (k, v) in obj.iter() {
-                m.insert(k.to_string(), v.clone());
-            } }
+            if let Some(obj) = e.payload.as_object() {
+                for (k, v) in obj.iter() {
+                    m.insert(k.to_string(), v.clone());
+                }
+            }
             lines.push(serde_json::to_string(&serde_json::Value::Object(m)).expect("jsonl row"));
         }
         let text = lines.join("\n") + "\n";
@@ -156,7 +166,9 @@ mod tests {
     use super::*;
 
     fn tmp_journal(tag: &str, session: Option<String>) -> Journal {
-        let dir = std::env::temp_dir().join(format!("curam-h2-j-{tag}")).join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join(format!("curam-h2-j-{tag}"))
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("j.db");
         Journal::open(p, session).unwrap()
@@ -165,9 +177,18 @@ mod tests {
     #[test]
     fn log_read_reopen_resume() {
         let mut j = tmp_journal("a", Some("sess1".into()));
-        let e1 = j.log("user_message", &serde_json::from_str("{\"text\":\"hi\"}").unwrap()).unwrap();
+        let e1 = j
+            .log(
+                "user_message",
+                &serde_json::from_str("{\"text\":\"hi\"}").unwrap(),
+            )
+            .unwrap();
         assert!(e1.is_some() && e1.unwrap() > 0);
-        j.log("tool_call", &serde_json::from_str("{\"name\":\"read\"}").unwrap()).unwrap();
+        j.log(
+            "tool_call",
+            &serde_json::from_str("{\"name\":\"read\"}").unwrap(),
+        )
+        .unwrap();
         let all = j.events(None).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].session_id, "sess1");
@@ -184,7 +205,11 @@ mod tests {
     #[test]
     fn export_jsonl_lists_all_events() {
         let mut j = tmp_journal("b", Some("sess2".into()));
-        j.log("user_message", &serde_json::from_str("{\"text\":\"hi\"}").unwrap()).unwrap();
+        j.log(
+            "user_message",
+            &serde_json::from_str("{\"text\":\"hi\"}").unwrap(),
+        )
+        .unwrap();
         let out = j.export_jsonl(None).unwrap();
         assert!(out.contains("\"seq\":1"), "jsonl starts with seq");
         assert!(out.contains("\"etype\":\"user_message\""), "etype present");

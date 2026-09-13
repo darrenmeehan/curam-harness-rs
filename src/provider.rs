@@ -59,7 +59,11 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn plain(content: &str) -> Self {
-        Self { content: Some(content.into()), tool_calls: Vec::new(), usage: None }
+        Self {
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+            usage: None,
+        }
     }
 }
 
@@ -84,7 +88,9 @@ pub fn resolve_provider_cfg(
     provider_name: Option<&str>,
 ) -> Result<config::ProviderCfg, ProviderError> {
     if cfg.providers.is_empty() {
-        return Err(ProviderError::new("no providers configured (add [providers.*] to curam.toml)".into()));
+        return Err(ProviderError::new(
+            "no providers configured (add [providers.*] to curam.toml)".into(),
+        ));
     }
     let name = provider_name.unwrap_or(cfg.default_provider.as_str());
     for p in &cfg.providers {
@@ -92,7 +98,15 @@ pub fn resolve_provider_cfg(
             return Ok(p.clone());
         }
     }
-    Err(ProviderError::new(format!("unknown provider {:?} (configured: {})", name, cfg.providers.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", "))))
+    Err(ProviderError::new(format!(
+        "unknown provider {:?} (configured: {})",
+        name,
+        cfg.providers
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
 }
 
 /// Read an API key from pi's credential store (~/.pi/agent/auth.json),
@@ -108,9 +122,7 @@ fn key_from_pi_auth(provider_name: &str) -> Option<String> {
     }
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let doc = serde_json::from_str(text.as_str()).unwrap_or(serde_json::Value::Null);
-    let entry = doc
-        .get(provider_name)
-        .and_then(|v| v.as_object());
+    let entry = doc.get(provider_name).and_then(|v| v.as_object());
     let key = entry
         .and_then(|e| e.get("key").and_then(|k| k.as_str()))
         .map(|k| k.to_string());
@@ -131,12 +143,16 @@ impl Provider {
     ) -> Result<Self, ProviderError> {
         let p = resolve_provider_cfg(cfg, provider_name)?;
         if p.base_url.is_empty() {
-            return Err(ProviderError::new(format!("provider {:?} has no base_url", p.name)));
+            return Err(ProviderError::new(format!(
+                "provider {:?} has no base_url",
+                p.name
+            )));
         }
         if !p.base_url.starts_with("http://") && !p.base_url.starts_with("https://") {
-            return Err(ProviderError::new(
-                format!("unsupported base_url scheme {:?} (http/https only)", p.base_url),
-            ));
+            return Err(ProviderError::new(format!(
+                "unsupported base_url scheme {:?} (http/https only)",
+                p.base_url
+            )));
         }
         let base_url = p.base_url.trim_end_matches('/').to_string();
         let model = model_override.unwrap_or(p.model.as_str()).to_string();
@@ -144,10 +160,19 @@ impl Provider {
             None
         } else {
             std::env::var_os(p.api_key_env.as_str())
-                .map(|v| std::path::PathBuf::from(v).to_str().unwrap_or_default().to_string())
+                .map(|v| {
+                    std::path::PathBuf::from(v)
+                        .to_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
                 .or_else(|| key_from_pi_auth(p.name.as_str()))
         };
-        let timeout = if p.timeout_s > 0.0 { p.timeout_s } else { 120.0 };
+        let timeout = if p.timeout_s > 0.0 {
+            p.timeout_s
+        } else {
+            120.0
+        };
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(timeout as u64)))
             .build()
@@ -178,7 +203,10 @@ impl Provider {
     pub fn chat(&self, messages: &[ApiMessage]) -> Result<ChatMessage, ProviderError> {
         let body = self.request_body(messages);
         let url = format!("{}/chat/completions", self.base_url);
-        let mut req = self.agent.post(url).header("Content-Type", "application/json");
+        let mut req = self
+            .agent
+            .post(url)
+            .header("Content-Type", "application/json");
         if let Some(k) = &self.api_key {
             req = req.header("Authorization", format!("Bearer {}", k));
         }
@@ -194,12 +222,19 @@ impl Provider {
         let status = resp.status().as_u16();
         let text = match resp.body_mut().read_to_string() {
             Ok(t) => t,
-            Err(e) => return Err(ProviderError::new(format!("provider read error ({}): {}", self.base_url, e))),
+            Err(e) => {
+                return Err(ProviderError::new(format!(
+                    "provider read error ({}): {}",
+                    self.base_url, e
+                )))
+            }
         };
         if !(200..300).contains(&status) {
             return Err(ProviderError::new(format!(
                 "provider error {} ({}): {}",
-                status, self.base_url, &text[0..SNIPPET_CHARS]
+                status,
+                self.base_url,
+                &text[0..SNIPPET_CHARS]
             )));
         }
         if self.stream {
@@ -238,9 +273,17 @@ impl Provider {
 fn parse_chat_json(text: &str) -> Result<ChatMessage, ProviderError> {
     let doc: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
-        Err(e) => return Err(ProviderError::new(format!("non-JSON provider response: {e}"))),
+        Err(e) => {
+            return Err(ProviderError::new(format!(
+                "non-JSON provider response: {e}"
+            )))
+        }
     };
-    let msg = doc.get("choices").and_then(|c| c.as_array()).and_then(|arr| arr.first()).and_then(|ch| ch.get("message"));
+    let msg = doc
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|ch| ch.get("message"));
     let msg = match msg {
         Some(m) => m,
         None => {
@@ -250,18 +293,39 @@ fn parse_chat_json(text: &str) -> Result<ChatMessage, ProviderError> {
             )));
         }
     };
-    let content = msg.get("content").and_then(|c| c.as_str()).map(|s| s.to_string());
+    let content = msg
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
     let mut tool_calls = Vec::new();
     if let Some(arr) = msg.get("tool_calls").and_then(|t| t.as_array()) {
         for tc in arr {
             let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or_default();
-            let name = tc.get("function").and_then(|f| f.as_object()).and_then(|o| o.get("name")).and_then(|n| n.as_str()).unwrap_or_default();
-            let args = tc.get("function").and_then(|f| f.as_object()).and_then(|o| o.get("arguments")).and_then(|a| a.as_str()).unwrap_or_default();
-            tool_calls.push(ToolCall { id: id.to_string(), name: name.to_string(), arguments: args.to_string() });
+            let name = tc
+                .get("function")
+                .and_then(|f| f.as_object())
+                .and_then(|o| o.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or_default();
+            let args = tc
+                .get("function")
+                .and_then(|f| f.as_object())
+                .and_then(|o| o.get("arguments"))
+                .and_then(|a| a.as_str())
+                .unwrap_or_default();
+            tool_calls.push(ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: args.to_string(),
+            });
         }
     }
     let usage = usage_of(doc.get("usage"));
-    Ok(ChatMessage { content, tool_calls, usage })
+    Ok(ChatMessage {
+        content,
+        tool_calls,
+        usage,
+    })
 }
 
 fn usage_of(v: Option<&Value>) -> Option<Usage> {
@@ -269,7 +333,10 @@ fn usage_of(v: Option<&Value>) -> Option<Usage> {
         let pt = u.get("prompt_tokens").and_then(|x| x.as_u64());
         let ct = u.get("completion_tokens").and_then(|x| x.as_u64());
         if pt.is_some() && ct.is_some() {
-            Some(Usage { prompt_tokens: pt.unwrap(), completion_tokens: ct.unwrap() })
+            Some(Usage {
+                prompt_tokens: pt.unwrap(),
+                completion_tokens: ct.unwrap(),
+            })
         } else {
             None
         }
@@ -305,8 +372,14 @@ fn assemble_sse(text: &str) -> Result<ChatMessage, ProviderError> {
             Ok(c) => c,
             Err(_) => continue, // tolerate a malformed chunk, keep the stream
         };
-        if let Some(u) = usage_of(chunk.get("usage")) { usage = Some(u) }
-        let delta = chunk.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|ch| ch.get("delta"));
+        if let Some(u) = usage_of(chunk.get("usage")) {
+            usage = Some(u)
+        }
+        let delta = chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|ch| ch.get("delta"));
         let delta = match delta {
             Some(d) => d,
             None => continue,
@@ -319,7 +392,11 @@ fn assemble_sse(text: &str) -> Result<ChatMessage, ProviderError> {
             for tc in arr {
                 let index = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                 while tool_calls.len() <= index {
-                    tool_calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
+                    tool_calls.push(ToolCall {
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                    });
                 }
                 let target = &mut tool_calls[index];
                 if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
@@ -340,9 +417,12 @@ fn assemble_sse(text: &str) -> Result<ChatMessage, ProviderError> {
     if acc_set {
         content = Some(acc);
     }
-    Ok(ChatMessage { content, tool_calls, usage })
+    Ok(ChatMessage {
+        content,
+        tool_calls,
+        usage,
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -394,7 +474,13 @@ mod tests {
         let body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a.py\\\"}\"}}]}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}";
         let url = serve(body, 200);
         let p = Provider::new(&test_cfg(url), None, None).unwrap();
-        let msg = p.chat(&[ApiMessage { role: "user".into(), content: "hi".into(), tool_call_id: None }]).unwrap();
+        let msg = p
+            .chat(&[ApiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+            }])
+            .unwrap();
         assert_eq!(msg.tool_calls.len(), 1);
         assert_eq!(msg.tool_calls[0].name, "read");
         assert_eq!(msg.tool_calls[0].arguments, "{\"path\":\"a.py\"}");
@@ -406,7 +492,13 @@ mod tests {
         let body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello there\"}}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}";
         let url = serve(body, 200);
         let p = Provider::new(&test_cfg(url), None, None).unwrap();
-        let msg = p.chat(&[ApiMessage { role: "user".into(), content: "hi".into(), tool_call_id: None }]).unwrap();
+        let msg = p
+            .chat(&[ApiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+            }])
+            .unwrap();
         assert_eq!(msg.content.unwrap(), "hello there");
         assert_eq!(msg.tool_calls.len(), 0);
         assert_eq!(msg.usage.unwrap().prompt_tokens, 4);
@@ -424,7 +516,13 @@ mod tests {
         let mut cfg = test_cfg(url);
         cfg.providers[0].stream = true;
         let p = Provider::new(&cfg, None, None).unwrap();
-        let msg = p.chat(&[ApiMessage { role: "user".into(), content: "hi".into(), tool_call_id: None }]).unwrap();
+        let msg = p
+            .chat(&[ApiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+            }])
+            .unwrap();
         assert_eq!(msg.content.unwrap(), "Hello");
         assert_eq!(msg.tool_calls.len(), 1);
         assert_eq!(msg.tool_calls[0].name, "write");
@@ -435,10 +533,17 @@ mod tests {
     fn provider_down_is_loud() {
         let url: String = "http://127.0.0.1:1".into(); // nothing listening
         let p = Provider::new(&test_cfg(url.clone()), None, None).unwrap();
-        let res = p.chat(&[ApiMessage { role: "user".into(), content: "hi".into(), tool_call_id: None }]);
+        let res = p.chat(&[ApiMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            tool_call_id: None,
+        }]);
         assert!(res.is_err());
         let e = res.unwrap_err();
-        assert!(e.msg.contains("provider unreachable"), "loud provider error");
+        assert!(
+            e.msg.contains("provider unreachable"),
+            "loud provider error"
+        );
         assert!(e.msg.contains(url.as_str()), "error names the base_url");
     }
 
@@ -446,7 +551,11 @@ mod tests {
     fn malformed_body_is_loud() {
         let url = serve("this is not json", 200);
         let p = Provider::new(&test_cfg(url), None, None).unwrap();
-        let res = p.chat(&[ApiMessage { role: "user".into(), content: "hi".into(), tool_call_id: None }]);
+        let res = p.chat(&[ApiMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            tool_call_id: None,
+        }]);
         assert!(res.is_err());
         assert!(res.unwrap_err().msg.contains("non-JSON"), "non-JSON error");
     }
@@ -455,7 +564,11 @@ mod tests {
     fn http_error_status_is_loud() {
         let url = serve("{\"error\":\"bad key\"}", 401);
         let p = Provider::new(&test_cfg(url), None, None).unwrap();
-        let res = p.chat(&[ApiMessage { role: "user".into(), content: "hi".into(), tool_call_id: None }]);
+        let res = p.chat(&[ApiMessage {
+            role: "user".into(),
+            content: "hi".into(),
+            tool_call_id: None,
+        }]);
         assert!(res.is_err());
         assert!(res.unwrap_err().msg.contains("401"), "status code surfaced");
     }

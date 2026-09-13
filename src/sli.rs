@@ -11,7 +11,11 @@ pub fn summary(events: &[EventRow]) -> String {
     for e in events {
         bump_kind(&mut kinds, e.etype.as_str());
         if e.etype == "cost" {
-            cost += e.payload.get("cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            cost += e
+                .payload
+                .get("cost_usd")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
         }
     }
     let asks = count(&kinds, "ask_human");
@@ -28,10 +32,19 @@ pub fn summary(events: &[EventRow]) -> String {
         if e.etype == "skill_used" {
             skill_rows.push(format!(
                 "    {}: x{} (desc {}ch, body {} lines)",
-                e.payload.get("name").and_then(|v| v.as_str()).unwrap_or_default(),
+                e.payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
                 e.payload.get("uses").and_then(|v| v.as_u64()).unwrap_or(0),
-                e.payload.get("desc_chars").and_then(|v| v.as_u64()).unwrap_or(0),
-                e.payload.get("body_lines").and_then(|v| v.as_u64()).unwrap_or(0),
+                e.payload
+                    .get("desc_chars")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                e.payload
+                    .get("body_lines")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
             ));
         }
     }
@@ -51,7 +64,8 @@ pub fn summary(events: &[EventRow]) -> String {
     for r in skill_rows {
         lines.push(r);
     }
-    let kind_str = kinds.iter()
+    let kind_str = kinds
+        .iter()
         .map(|(k, n)| format!("{}:{}", k, n))
         .collect::<Vec<_>>()
         .join(", ");
@@ -109,13 +123,25 @@ mod tests {
             ev("approval_granted", "{}"),
             ev("cost", "{\"cost_usd\":0.0416}"),
             ev("cost", "{\"cost_usd\":0.0020}"),
-            ev("skill_used", "{\"name\":\"git-workflow\",\"uses\":2,\"desc_chars\":80,\"body_lines\":30}"),
+            ev(
+                "skill_used",
+                "{\"name\":\"git-workflow\",\"uses\":2,\"desc_chars\":80,\"body_lines\":30}",
+            ),
         ];
         let out = summary(&events);
-        assert!(out.contains("tool_calls: 2   results: 1   denied: 1   pending: 0"), "tool tallies");
+        assert!(
+            out.contains("tool_calls: 2   results: 1   denied: 1   pending: 0"),
+            "tool tallies"
+        );
         assert!(out.contains("cost: $0.0436"), "cost rollup");
-        assert!(out.contains("asks: 1   approvals: 1 (granted 1)"), "ask tallies");
+        assert!(
+            out.contains("asks: 1   approvals: 1 (granted 1)"),
+            "ask tallies"
+        );
         assert!(out.contains("skills used: 1 total calls"), "skill metric");
-        assert!(out.contains("git-workflow: x2 (desc 80ch, body 30 lines)"), "skill detail");
+        assert!(
+            out.contains("git-workflow: x2 (desc 80ch, body 30 lines)"),
+            "skill detail"
+        );
     }
 }

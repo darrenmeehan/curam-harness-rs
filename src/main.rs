@@ -8,8 +8,8 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-mod config;
 mod budget;
+mod config;
 mod doctor;
 mod journal;
 mod provider;
