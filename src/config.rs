@@ -13,7 +13,7 @@
 //! are also accepted).
 
 use std::path::{Path, PathBuf};
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{value, DocumentMut, Item, Table};
 
 /// The shipped defaults — the POC curam.toml shape plus the Rust-phase
 /// sections ([tools]/[run]/[cage]). Later layers replace whole top-level
@@ -247,8 +247,7 @@ pub fn expand_home(p: &str) -> PathBuf {
         return PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     }
     if let Some(rest) = p.strip_prefix("~/") {
-        std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join(rest)
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest)
     } else {
         PathBuf::from(p)
     }
@@ -290,7 +289,10 @@ fn need_u64(t: &Table, section: &str, key: &str, default: u64) -> Result<u64, Co
         Some(item) => match item.as_integer() {
             Some(i) => {
                 if i < 0 {
-                    err(format!("[{section}] {key}"), "expected a non-negative integer")
+                    err(
+                        format!("[{section}] {key}"),
+                        "expected a non-negative integer",
+                    )
                 } else {
                     Ok(i as u64)
                 }
@@ -334,10 +336,12 @@ fn need_str_list(t: &Table, section: &str, key: &str) -> Result<Vec<String>, Con
                 for (i, el) in arr.iter().enumerate() {
                     match el.as_str() {
                         Some(s) => out.push(s.to_string()),
-                        None => return err(
-                            format!("[{section}] {key}[{i}]"),
-                            format!("expected string, got {}", el.type_name()),
-                        ),
+                        None => {
+                            return err(
+                                format!("[{section}] {key}[{i}]"),
+                                format!("expected string, got {}", el.type_name()),
+                            )
+                        }
                     }
                 }
                 Ok(out)
@@ -359,14 +363,23 @@ fn need_enum(
     } else {
         err(
             format!("[{section}] {key}"),
-            format!("unknown value {:?}, expected one of {}", raw, allowed.join(", ")),
+            format!(
+                "unknown value {:?}, expected one of {}",
+                raw,
+                allowed.join(", ")
+            ),
         )
     }
 }
 
 /// Either a scalar string ([legacy] workdir = "...") or a one-key table
 /// ([workdir] path = "...").
-fn need_path_field(t: &Table, section: &str, key: &str, default: &str) -> Result<String, ConfigError> {
+fn need_path_field(
+    t: &Table,
+    section: &str,
+    key: &str,
+    default: &str,
+) -> Result<String, ConfigError> {
     match t.get(key) {
         None => Ok(default.into()),
         Some(item) => match item.as_str() {
@@ -375,7 +388,10 @@ fn need_path_field(t: &Table, section: &str, key: &str, default: &str) -> Result
                 Some(inner) => need_str(inner, section, "path", default),
                 None => err(
                     format!("[{section}] {key}"),
-                    format!("expected string or table with `path`, got {}", item.type_name()),
+                    format!(
+                        "expected string or table with `path`, got {}",
+                        item.type_name()
+                    ),
                 ),
             },
         },
@@ -390,7 +406,7 @@ fn warn_unknown(t: &Table, prefix: &str, known: &[&str], warnings: &mut Vec<Stri
     for (key, _) in t.iter() {
         if !known.contains(&key) {
             let label = if prefix.is_empty() {
-                format!("{key}")
+                key.to_string()
             } else {
                 format!("{} {}", prefix, key)
             };
@@ -400,28 +416,58 @@ fn warn_unknown(t: &Table, prefix: &str, known: &[&str], warnings: &mut Vec<Stri
 }
 
 const KNOWN_TOP: &[&str] = &[
-    "default_provider", "providers", "budget", "pii", "classifier", "ui",
-    "tools", "run", "cage", "agent", "policy", "journal", "workdir",
+    "default_provider",
+    "providers",
+    "budget",
+    "pii",
+    "classifier",
+    "ui",
+    "tools",
+    "run",
+    "cage",
+    "agent",
+    "policy",
+    "journal",
+    "workdir",
 ];
 const KNOWN_PROVIDER: &[&str] = &[
-    "base_url", "model", "api_key_env", "context_window",
-    "reasoning_effort", "reasoning_effort_supported", "timeout_s",
-    "max_tokens", "stream",
+    "base_url",
+    "model",
+    "api_key_env",
+    "context_window",
+    "reasoning_effort",
+    "reasoning_effort_supported",
+    "timeout_s",
+    "max_tokens",
+    "stream",
 ];
 const KNOWN_BUDGET: &[&str] = &["cap_usd", "price_per_mtok"];
 const KNOWN_PII: &[&str] = &["level", "placeholder", "internal_domains"];
 const KNOWN_CLASSIFIER: &[&str] = &["enabled", "model"];
 const KNOWN_UI: &[&str] = &[
-    "theme", "show_thinking", "show_commands", "max_output_chars", "time_format",
+    "theme",
+    "show_thinking",
+    "show_commands",
+    "max_output_chars",
+    "time_format",
 ];
 const KNOWN_TOOLS: &[&str] = &["shell", "run", "max_read_chars", "timeout_default_s"];
 const KNOWN_RUN: &[&str] = &[
-    "default_net", "default_timeout_s", "allow_programs", "ask_programs", "deny_programs",
+    "default_net",
+    "default_timeout_s",
+    "allow_programs",
+    "ask_programs",
+    "deny_programs",
 ];
 const KNOWN_CAGE: &[&str] = &["binary", "lists_dir", "geo", "fallback"];
 const KNOWN_AGENT: &[&str] = &[
-    "system_prompt", "skills_dir", "skills_max_description_chars",
-    "skills_max_body_lines", "max_iterations", "stuck_threshold", "skills",
+    "system_prompt",
+    "skills_dir",
+    "skills_max_description_chars",
+    "skills_max_body_lines",
+    "max_iterations",
+    "stuck_threshold",
+    "skills",
 ];
 const KNOWN_POLICY: &[&str] = &["rules"];
 const KNOWN_POLICY_RULES: &[&str] = &["allow", "ask", "deny"];
@@ -453,7 +499,7 @@ pub struct Loader {
 impl Loader {
     pub fn new(explicit: Option<String>, db_override: Option<String>) -> Self {
         Self {
-            explicit: explicit.map(|p| PathBuf::from(p)),
+            explicit: explicit.map(PathBuf::from),
             db_override,
         }
     }
@@ -462,8 +508,12 @@ impl Loader {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(|d| PathBuf::from(d).join("curam").join("curam.toml"))
             .or_else(|| {
-                std::env::var_os("HOME")
-                    .map(|h| PathBuf::from(h).join(".config").join("curam").join("curam.toml"))
+                std::env::var_os("HOME").map(|h| {
+                    PathBuf::from(h)
+                        .join(".config")
+                        .join("curam")
+                        .join("curam.toml")
+                })
             })
     }
 
@@ -472,9 +522,8 @@ impl Loader {
         let mut out = Vec::new();
         out.push(("user".into(), Self::user_config_path()));
         out.push(("project".into(), Some(PathBuf::from("curam.toml"))));
-        match &self.explicit {
-            Some(p) => out.push(("explicit".into(), Some(p.clone()))),
-            None => {}
+        if let Some(p) = &self.explicit {
+            out.push(("explicit".into(), Some(p.clone())))
         }
         out
     }
@@ -482,7 +531,10 @@ impl Loader {
     /// Load + validate + interpret the effective configuration.
     pub fn load(&self) -> Result<Config, ConfigError> {
         let mut merged = str::parse::<DocumentMut>(DEFAULT_CONFIG).map_err(|e| {
-            ConfigError::new("defaults".into(), format!("internal default config broken: {e}"))
+            ConfigError::new(
+                "defaults".into(),
+                format!("internal default config broken: {e}"),
+            )
         })?;
         let mut top: Option<PathBuf> = None;
         for (tag, p) in self.layer_paths() {
@@ -490,8 +542,9 @@ impl Loader {
                 if !path.exists() {
                     continue;
                 }
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| ConfigError::new(format!("{path:?}"), format!("unreadable: {e}")))?;
+                let text = std::fs::read_to_string(&path).map_err(|e| {
+                    ConfigError::new(format!("{path:?}"), format!("unreadable: {e}"))
+                })?;
                 let layer = str::parse::<DocumentMut>(text.as_str()).map_err(|e| {
                     ConfigError::new(format!("{path:?}"), format!("TOML parse error: {e}"))
                 })?;
@@ -505,7 +558,12 @@ impl Loader {
             }
         }
         let mut warnings: Vec<String> = Vec::new();
-        let cfg = interpret(&merged, &mut warnings, top.clone(), self.db_override.clone())?;
+        let cfg = interpret(
+            &merged,
+            &mut warnings,
+            top.clone(),
+            self.db_override.clone(),
+        )?;
         let effective = merged.to_string();
         Ok(Config {
             default_provider: cfg.default_provider,
@@ -572,7 +630,10 @@ fn interpret(
         cage,
         agent,
         policy_rules,
-        journal: JournalCfg { path: journal_path, keep: journal.keep },
+        journal: JournalCfg {
+            path: journal_path,
+            keep: journal.keep,
+        },
         workdir: expand_home(workdir.as_str()),
         config_path: top,
     })
@@ -619,8 +680,9 @@ fn need_providers(t: &Table, warnings: &mut Vec<String>) -> Result<Vec<ProviderC
                         stream: true,
                     });
                 } else if let Some(pt2) = item.as_table() {
-                        let section = format!("providers.{name}");
-                    let prefix = format!("[{section}] ");                    warn_unknown(pt2, prefix.as_str(), KNOWN_PROVIDER, warnings);
+                    let section = format!("providers.{name}");
+                    let prefix = format!("[{section}] ");
+                    warn_unknown(pt2, prefix.as_str(), KNOWN_PROVIDER, warnings);
                     let cfg = ProviderCfg {
                         name: name.into(),
                         base_url: need_str(pt2, section.as_str(), "base_url", "")?,
@@ -628,7 +690,10 @@ fn need_providers(t: &Table, warnings: &mut Vec<String>) -> Result<Vec<ProviderC
                         api_key_env: need_str(pt2, section.as_str(), "api_key_env", "")?,
                         context_window: need_u64(pt2, section.as_str(), "context_window", 0)?,
                         reasoning_effort_supported: need_bool(
-                            pt2, section.as_str(), "reasoning_effort_supported", true,
+                            pt2,
+                            section.as_str(),
+                            "reasoning_effort_supported",
+                            true,
                         )?,
                         reasoning_effort: match pt2.get("reasoning_effort") {
                             None => None,
@@ -656,7 +721,10 @@ fn need_providers(t: &Table, warnings: &mut Vec<String>) -> Result<Vec<ProviderC
 
 fn need_budget(t: &Table, warnings: &mut Vec<String>) -> Result<BudgetCfg, ConfigError> {
     match t.get("budget").and_then(|i| i.as_table()) {
-        None => Ok(BudgetCfg { cap_usd: 0.0, price_per_mtok: Vec::new() }),
+        None => Ok(BudgetCfg {
+            cap_usd: 0.0,
+            price_per_mtok: Vec::new(),
+        }),
         Some(bt) => {
             warn_unknown(bt, "[budget]", KNOWN_BUDGET, warnings);
             let cap_usd = need_f64(bt, "budget", "cap_usd", 0.0)?;
@@ -664,9 +732,10 @@ fn need_budget(t: &Table, warnings: &mut Vec<String>) -> Result<BudgetCfg, Confi
             match bt.get("price_per_mtok").and_then(|i| i.as_table()) {
                 None => {}
                 Some(mt) => {
-            for (mkey, mitem) in mt.iter() {
+                    for (mkey, mitem) in mt.iter() {
                         if mitem.is_float() {
-                            price_per_mtok.push((mkey.to_string(), mitem.as_float().unwrap_or(0.0)));
+                            price_per_mtok
+                                .push((mkey.to_string(), mitem.as_float().unwrap_or(0.0)));
                         } else if mitem.is_integer() {
                             price_per_mtok.push((
                                 mkey.to_string(),
@@ -681,7 +750,10 @@ fn need_budget(t: &Table, warnings: &mut Vec<String>) -> Result<BudgetCfg, Confi
                     }
                 }
             }
-            Ok(BudgetCfg { cap_usd, price_per_mtok })
+            Ok(BudgetCfg {
+                cap_usd,
+                price_per_mtok,
+            })
         }
     }
 }
@@ -696,7 +768,13 @@ fn need_pii(t: &Table, warnings: &mut Vec<String>) -> Result<PiiCfg, ConfigError
         Some(pt) => {
             warn_unknown(pt, "[pii]", KNOWN_PII, warnings);
             Ok(PiiCfg {
-                level: need_enum(pt, "pii", "level", "deterministic", &["off", "deterministic", "local_llm"])?,
+                level: need_enum(
+                    pt,
+                    "pii",
+                    "level",
+                    "deterministic",
+                    &["off", "deterministic", "local_llm"],
+                )?,
                 placeholder: need_str(pt, "pii", "placeholder", "{REDACTED}")?,
                 internal_domains: need_str_list(pt, "pii", "internal_domains")?,
             })
@@ -706,7 +784,10 @@ fn need_pii(t: &Table, warnings: &mut Vec<String>) -> Result<PiiCfg, ConfigError
 
 fn need_classifier(t: &Table, warnings: &mut Vec<String>) -> Result<ClassifierCfg, ConfigError> {
     match t.get("classifier").and_then(|i| i.as_table()) {
-        None => Ok(ClassifierCfg { enabled: false, model: String::new() }),
+        None => Ok(ClassifierCfg {
+            enabled: false,
+            model: String::new(),
+        }),
         Some(ct) => {
             warn_unknown(ct, "[classifier]", KNOWN_CLASSIFIER, warnings);
             Ok(ClassifierCfg {
@@ -723,11 +804,23 @@ fn need_ui(t: &Table, warnings: &mut Vec<String>) -> Result<UiCfg, ConfigError> 
         Some(ut) => {
             warn_unknown(ut, "[ui]", KNOWN_UI, warnings);
             Ok(UiCfg {
-                theme: need_enum(ut, "ui", "theme", "auto", &["auto", "dark", "light", "plain"])?,
+                theme: need_enum(
+                    ut,
+                    "ui",
+                    "theme",
+                    "auto",
+                    &["auto", "dark", "light", "plain"],
+                )?,
                 show_thinking: need_bool(ut, "ui", "show_thinking", true)?,
                 show_commands: need_bool(ut, "ui", "show_commands", true)?,
                 max_output_chars: need_u64(ut, "ui", "max_output_chars", 8000)?,
-                time_format: need_enum(ut, "ui", "time_format", "relative", &["relative", "clock"])?,
+                time_format: need_enum(
+                    ut,
+                    "ui",
+                    "time_format",
+                    "relative",
+                    &["relative", "clock"],
+                )?,
             })
         }
     }
@@ -745,7 +838,12 @@ fn default_ui() -> UiCfg {
 
 fn need_tools(t: &Table, warnings: &mut Vec<String>) -> Result<ToolsCfg, ConfigError> {
     match t.get("tools").and_then(|i| i.as_table()) {
-        None => Ok(ToolsCfg { shell: true, run: true, max_read_chars: 60000, timeout_default_s: 60 }),
+        None => Ok(ToolsCfg {
+            shell: true,
+            run: true,
+            max_read_chars: 60000,
+            timeout_default_s: 60,
+        }),
         Some(tt) => {
             warn_unknown(tt, "[tools]", KNOWN_TOOLS, warnings);
             Ok(ToolsCfg {
@@ -764,7 +862,14 @@ fn need_run(t: &Table, warnings: &mut Vec<String>) -> Result<RunCfg, ConfigError
             default_net: true,
             default_timeout_s: 120,
             allow_programs: Vec::new(),
-            ask_programs: vec!["git".into(), "curl".into(), "wget".into(), "scp".into(), "bash".into(), "sh".into()],
+            ask_programs: vec![
+                "git".into(),
+                "curl".into(),
+                "wget".into(),
+                "scp".into(),
+                "bash".into(),
+                "sh".into(),
+            ],
             deny_programs: Vec::new(),
         }),
         Some(rt) => {
@@ -815,7 +920,12 @@ fn need_agent(t: &Table, warnings: &mut Vec<String>) -> Result<AgentCfg, ConfigE
             Ok(AgentCfg {
                 system_prompt: need_str(at, "agent", "system_prompt", "")?,
                 skills_dir: need_str(at, "agent", "skills_dir", "skills")?,
-                skills_max_description_chars: need_u64(at, "agent", "skills_max_description_chars", 240)?,
+                skills_max_description_chars: need_u64(
+                    at,
+                    "agent",
+                    "skills_max_description_chars",
+                    240,
+                )?,
                 skills_max_body_lines: need_u64(at, "agent", "skills_max_body_lines", 200)?,
                 max_iterations: need_u64(at, "agent", "max_iterations", 25)?,
                 stuck_threshold: need_u64(at, "agent", "stuck_threshold", 3)?,
@@ -827,11 +937,19 @@ fn need_agent(t: &Table, warnings: &mut Vec<String>) -> Result<AgentCfg, ConfigE
 fn need_policy(t: &Table, warnings: &mut Vec<String>) -> Result<PolicyRulesCfg, ConfigError> {
     let policy = t.get("policy").and_then(|i| i.as_table());
     match policy {
-        None => Ok(PolicyRulesCfg { allow: Vec::new(), ask: Vec::new(), deny: Vec::new() }),
+        None => Ok(PolicyRulesCfg {
+            allow: Vec::new(),
+            ask: Vec::new(),
+            deny: Vec::new(),
+        }),
         Some(pot) => {
             warn_unknown(pot, "[policy]", KNOWN_POLICY, warnings);
             match pot.get("rules").and_then(|i| i.as_table()) {
-                None => Ok(PolicyRulesCfg { allow: Vec::new(), ask: Vec::new(), deny: Vec::new() }),
+                None => Ok(PolicyRulesCfg {
+                    allow: Vec::new(),
+                    ask: Vec::new(),
+                    deny: Vec::new(),
+                }),
                 Some(rt) => {
                     warn_unknown(rt, "[policy.rules]", KNOWN_POLICY_RULES, warnings);
                     Ok(PolicyRulesCfg {
@@ -892,7 +1010,8 @@ fn known_set_key(parts: &[&str]) -> bool {
         "cage" => tail.len() == 1 && KNOWN_CAGE.contains(&tail[0]),
         "agent" => tail.len() == 1 && KNOWN_AGENT.contains(&tail[0]),
         "policy" => {
-            tail.len() == 2 && tail[0] == "rules"
+            tail.len() == 2
+                && tail[0] == "rules"
                 && (tail[1] == "allow" || tail[1] == "ask" || tail[1] == "deny")
         }
         "journal" => tail.len() == 1 && KNOWN_JOURNAL.contains(&tail[0]),
@@ -907,16 +1026,19 @@ fn known_set_key(parts: &[&str]) -> bool {
 pub fn set_key(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     let parts: Vec<&str> = key.split('.').collect::<Vec<_>>();
     if !known_set_key(&parts) {
-        return err(format!("{key}"), "unknown config key (see curam config --show)");
+        return err(
+            key.to_string(),
+            "unknown config key (see curam config --show)",
+        );
     }
     let text = if path.exists() {
-        std::fs::read_to_string(path).map_err(|e| ConfigError::new(format!("{path:?}"), e.to_string()))?
+        std::fs::read_to_string(path)
+            .map_err(|e| ConfigError::new(format!("{path:?}"), e.to_string()))?
     } else {
         DEFAULT_CONFIG.into()
     };
-    let mut doc = str::parse::<DocumentMut>(text.as_str()).map_err(|e| {
-        ConfigError::new(format!("{path:?}"), format!("TOML parse error: {e}"))
-    })?;
+    let mut doc = str::parse::<DocumentMut>(text.as_str())
+        .map_err(|e| ConfigError::new(format!("{path:?}"), format!("TOML parse error: {e}")))?;
 
     // Walk the table path, creating subtables as needed, then set the leaf.
     let nodetable = doc.as_table_mut();
@@ -961,7 +1083,10 @@ pub fn scaffold(dir: &Path) -> Result<Vec<String>, String> {
 
     let cfg_path = dir.join("curam.toml");
     if cfg_path.exists() {
-        lines.push(format!("{}  (exists, kept)", cfg_path.to_str().unwrap_or_default()));
+        lines.push(format!(
+            "{}  (exists, kept)",
+            cfg_path.to_str().unwrap_or_default()
+        ));
     } else {
         std::fs::write(&cfg_path, DEFAULT_CONFIG.as_bytes())
             .map_err(|e| format!("write {cfg_path:?}: {e}"))?;
@@ -970,11 +1095,20 @@ pub fn scaffold(dir: &Path) -> Result<Vec<String>, String> {
 
     let gitignore = dir.join(".gitignore");
     if gitignore.exists() {
-        lines.push(format!("{}  (exists, kept)", gitignore.to_str().unwrap_or_default()));
+        lines.push(format!(
+            "{}  (exists, kept)",
+            gitignore.to_str().unwrap_or_default()
+        ));
     } else {
-        std::fs::write(&gitignore, b"target/\nwork/\n*.db\n*.db-wal\n*.db-shm\n.venv/\n")
-            .map_err(|e| format!("write {gitignore:?}: {e}"))?;
-        lines.push(format!("created {}", gitignore.to_str().unwrap_or_default()));
+        std::fs::write(
+            &gitignore,
+            b"target/\nwork/\n*.db\n*.db-wal\n*.db-shm\n.venv/\n",
+        )
+        .map_err(|e| format!("write {gitignore:?}: {e}"))?;
+        lines.push(format!(
+            "created {}",
+            gitignore.to_str().unwrap_or_default()
+        ));
     }
 
     let skills = dir.join("work").join("skills");
@@ -983,7 +1117,7 @@ pub fn scaffold(dir: &Path) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(&evals).map_err(|e| format!("mkdir {evals:?}: {e}"))?;
     lines.push(format!("created {}/", skills.to_str().unwrap_or_default()));
     lines.push(format!("created {}/", evals.to_str().unwrap_or_default()));
-    lines.push(format!("next: put markdown skills in work/skills/ and evals in work/evals/"));
+    lines.push("next: put markdown skills in work/skills/ and evals in work/evals/".to_string());
     Ok(lines)
 }
 
@@ -1061,11 +1195,17 @@ ask = ["rm", "systemctl", "sudo"]
 
     #[test]
     fn legacy_poc_toml_parses_identically() {
-        let dir = std::env::temp_dir().join("curam-h1-a").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-a")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = load_dir(&dir).unwrap();
         assert_eq!(cfg.default_provider, "openrouter");
-        let named = cfg.providers.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        let named = cfg
+            .providers
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>();
         assert_eq!(named, vec!["ollama", "openrouter"]);
         let op = cfg.providers[1].clone();
         assert_eq!(op.model, "deepseek/deepseek-v4-flash");
@@ -1081,24 +1221,35 @@ ask = ["rm", "systemctl", "sudo"]
         assert_eq!(cfg.policy_rules.ask, vec!["rm", "systemctl", "sudo"]);
         // legacy top-level string shapes for workdir/journal
         assert_eq!(cfg.workdir, std::path::PathBuf::from("./work"));
-        assert_eq!(expand_home(cfg.journal.path.as_str()), expand_home("~/.local/share/curam/curam.db"));
+        assert_eq!(
+            expand_home(cfg.journal.path.as_str()),
+            expand_home("~/.local/share/curam/curam.db")
+        );
     }
 
     #[test]
     fn later_layers_win() {
-        let dir = std::env::temp_dir().join("curam-h1-b").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-b")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let user = write_cfg(&dir, "user.toml", "default_provider = \"ollama\"\n[budget]\ncap_usd = 0.05\n");
+        let user = write_cfg(
+            &dir,
+            "user.toml",
+            "default_provider = \"ollama\"\n[budget]\ncap_usd = 0.05\n",
+        );
         // explicit > user? explicit is the ONLY file read with --config;
         // simulate project+explicit by pointing at dir/curam.toml too.
         std::fs::write(dir.join("curam.toml"), POC_TOML.as_bytes()).unwrap();
         let _ = user; // keep borrow simple
-        // Later wins check across layers happens inside load(); here we
-        // verify the winning layer mechanism: explicit replaces project.
+                      // Later wins check across layers happens inside load(); here we
+                      // verify the winning layer mechanism: explicit replaces project.
         let explicit = dir.join("explicit.toml");
         std::fs::write(&explicit, "default_provider = \"local\"\n").unwrap();
         // sandbox HOME/XDG so the user layer can't interfere
-        let cfg = Loader::new(Some(explicit.to_str().unwrap().to_string()), None).load().unwrap();
+        let cfg = Loader::new(Some(explicit.to_str().unwrap().to_string()), None)
+            .load()
+            .unwrap();
         assert_eq!(cfg.default_provider, "local");
         // when no explicit file, ./curam.toml in cwd wins... load() reads
         // relative "./curam.toml" — not controllable here beyond isolation.
@@ -1107,7 +1258,9 @@ ask = ["rm", "systemctl", "sudo"]
 
     #[test]
     fn wrong_type_is_hard_error_with_path() {
-        let dir = std::env::temp_dir().join("curam-h1-c").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-c")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = write_cfg(&dir, "bad.toml", "[budget]\ncap_usd = \"abc\"\n");
         let res = Loader::new(Some(f.to_str().unwrap().to_string()), None).load();
@@ -1122,17 +1275,23 @@ ask = ["rm", "systemctl", "sudo"]
 
     #[test]
     fn unknown_key_warns_not_fatal() {
-        let dir = std::env::temp_dir().join("curam-h1-d").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-d")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = write_cfg(&dir, "warn.toml", "[bogus]\nx = 1\n");
-        let cfg = Loader::new(Some(f.to_str().unwrap().to_string()), None).load().unwrap();
+        let cfg = Loader::new(Some(f.to_str().unwrap().to_string()), None)
+            .load()
+            .unwrap();
         assert!(cfg.warnings.iter().any(|w| w.contains("unknown key bogus")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn invalid_enum_is_hard_error() {
-        let dir = std::env::temp_dir().join("curam-h1-e").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-e")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = write_cfg(&dir, "enum.toml", "[pii]\nlevel = \"nope\"\n");
         let res = Loader::new(Some(f.to_str().unwrap().to_string()), None).load();
@@ -1146,7 +1305,9 @@ ask = ["rm", "systemctl", "sudo"]
 
     #[test]
     fn set_key_writes_and_reloads() {
-        let dir = std::env::temp_dir().join("curam-h1-f").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-f")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("curam.toml");
         set_key(&f, "budget.cap_usd", "0.05").unwrap();
@@ -1156,7 +1317,9 @@ ask = ["rm", "systemctl", "sudo"]
         // unknown key rejected
         assert!(set_key(&f, "nope", "1").is_err());
         // and the file still loads with the new value
-        let cfg = Loader::new(Some(f.to_str().unwrap().to_string()), None).load().unwrap();
+        let cfg = Loader::new(Some(f.to_str().unwrap().to_string()), None)
+            .load()
+            .unwrap();
         assert_eq!(cfg.budget.cap_usd, 0.05);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1164,13 +1327,18 @@ ask = ["rm", "systemctl", "sudo"]
     #[test]
     fn expand_home_resolves_tilde() {
         let home = std::env::var_os("HOME").unwrap_or_default();
-        assert_eq!(expand_home("~/.local/x"), std::path::PathBuf::from(home).join(".local/x"));
+        assert_eq!(
+            expand_home("~/.local/x"),
+            std::path::PathBuf::from(home).join(".local/x")
+        );
         assert_eq!(expand_home("./work"), std::path::PathBuf::from("./work"));
     }
 
     #[test]
     fn scaffold_is_idempotent() {
-        let dir = std::env::temp_dir().join("curam-h1-g").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h1-g")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = scaffold(&dir).unwrap();
         let cfg_path = dir.join("curam.toml");

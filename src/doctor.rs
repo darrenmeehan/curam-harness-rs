@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use super::config;
-use super::config::{expand_home};
+use super::config::expand_home;
 
 #[derive(Debug)]
 pub struct Check {
@@ -32,26 +32,46 @@ pub fn run(cfg: &config::Config) -> Vec<Check> {
     } else {
         format!(", {} warning(s) above", cfg.warnings.len())
     };
-    out.push(Check { name: "config".into(), ok: true, detail: format!("loaded from {} {}", source, warn_note) });
+    out.push(Check {
+        name: "config".into(),
+        ok: true,
+        detail: format!("loaded from {} {}", source, warn_note),
+    });
 
     // workdir: must exist (create) and be a directory.
     let wd = &cfg.workdir;
-    match std::fs::create_dir_all(&wd) {
+    match std::fs::create_dir_all(wd) {
         Ok(_) if wd.is_dir() => {
-            out.push(Check { name: "workdir".into(), ok: true, detail: format!("{} (writable)", wd.to_str().unwrap_or_default()) });
+            out.push(Check {
+                name: "workdir".into(),
+                ok: true,
+                detail: format!("{} (writable)", wd.to_str().unwrap_or_default()),
+            });
         }
         Ok(_) => {
-            out.push(Check { name: "workdir".into(), ok: false, detail: format!("{} is not a directory", wd.to_str().unwrap_or_default()) });
+            out.push(Check {
+                name: "workdir".into(),
+                ok: false,
+                detail: format!("{} is not a directory", wd.to_str().unwrap_or_default()),
+            });
         }
         Err(e) => {
-            out.push(Check { name: "workdir".into(), ok: false, detail: format!("{}: {}", wd.to_str().unwrap_or_default(), e) });
+            out.push(Check {
+                name: "workdir".into(),
+                ok: false,
+                detail: format!("{}: {}", wd.to_str().unwrap_or_default(), e),
+            });
         }
     }
 
     // cage: the single exec boundary must resolve to a real binary.
     match resolve_cage_bin(cfg) {
         Some(p) => {
-            out.push(Check { name: "cage".into(), ok: true, detail: format!("curam-run @ {}", p.to_str().unwrap_or_default()) });
+            out.push(Check {
+                name: "cage".into(),
+                ok: true,
+                detail: format!("curam-run @ {}", p.to_str().unwrap_or_default()),
+            });
         }
         None => {
             out.push(Check {
@@ -66,19 +86,34 @@ pub fn run(cfg: &config::Config) -> Vec<Check> {
     // lists: absent is tolerated (built-in defaults); a present dir is noted.
     let lists = expand_home(cfg.cage.lists_dir.as_str());
     if lists.is_dir() {
-        out.push(Check { name: "lists".into(), ok: true, detail: format!("{}", lists.to_str().unwrap_or_default()) });
+        out.push(Check {
+            name: "lists".into(),
+            ok: true,
+            detail: lists.to_str().unwrap_or_default().to_string(),
+        });
     } else {
         out.push(Check {
             name: "lists".into(),
             ok: true,
-            detail: format!("no lists at {} — match_host uses built-in defaults", lists.to_str().unwrap_or_default()),
+            detail: format!(
+                "no lists at {} — match_host uses built-in defaults",
+                lists.to_str().unwrap_or_default()
+            ),
         });
     }
 
     // terminal: informational for H1 (TUI/REPL land in H5).
     let tty = std::io::stdin().is_terminal();
-    let term = if tty { "interactive tty" } else { "non-interactive (piped)" };
-    out.push(Check { name: "terminal".into(), ok: true, detail: term.into() });
+    let term = if tty {
+        "interactive tty"
+    } else {
+        "non-interactive (piped)"
+    };
+    out.push(Check {
+        name: "terminal".into(),
+        ok: true,
+        detail: term.into(),
+    });
 
     out
 }
@@ -98,7 +133,14 @@ fn resolve_cage_bin(cfg: &config::Config) -> Option<PathBuf> {
         return Some(dir);
     }
     let dev = std::env::var_os("HOME")
-        .map(|h| PathBuf::from(h).join("code").join("curam-security").join("target").join("debug").join("curam-run"))
+        .map(|h| {
+            PathBuf::from(h)
+                .join("code")
+                .join("curam-security")
+                .join("target")
+                .join("debug")
+                .join("curam-run")
+        })
         .unwrap_or(PathBuf::from("/nonexistent/curam-run"));
     if dev.exists() {
         Some(dev)
@@ -109,7 +151,12 @@ fn resolve_cage_bin(cfg: &config::Config) -> Option<PathBuf> {
 
 fn path_search(bin: &str) -> Option<PathBuf> {
     let path: String = std::env::var_os("PATH")
-        .map(|p| std::path::PathBuf::from(p).to_str().unwrap_or_default().to_string())
+        .map(|p| {
+            std::path::PathBuf::from(p)
+                .to_str()
+                .unwrap_or_default()
+                .to_string()
+        })
         .unwrap_or_default();
     path.split(':')
         .map(|d| PathBuf::from(d).join(bin))

@@ -156,9 +156,12 @@ fn run(cli: &Cli) -> i32 {
             one_shot(cli.task.join(" "))
         }
         Some(Commands::Init { dir }) => cmd_init(&loader, dir),
-        Some(Commands::Config { show, validate, path, set }) => {
-            cmd_config(&loader, show, validate, path, set)
-        }
+        Some(Commands::Config {
+            show,
+            validate,
+            path,
+            set,
+        }) => cmd_config(&loader, show, validate, path, set),
         Some(Commands::Doctor) => cmd_doctor(&loader),
         Some(cmd) => not_yet(cmd),
     }
@@ -166,7 +169,9 @@ fn run(cli: &Cli) -> i32 {
 
 /// One-shot task: the provider + agent loop land in H3.
 fn one_shot(task: String) -> i32 {
-    eprintln!("curam: task not run — the agent loop (provider + tools) lands in H3 (task was: {task})");
+    eprintln!(
+        "curam: task not run — the agent loop (provider + tools) lands in H3 (task was: {task})"
+    );
     EXIT_ERROR
 }
 
@@ -304,7 +309,10 @@ mod tests {
 
     #[test]
     fn split_key_value_splits_on_first_equals() {
-        assert_eq!(split_key_value("budget.cap_usd=0.05"), ("budget.cap_usd", "0.05"));
+        assert_eq!(
+            split_key_value("budget.cap_usd=0.05"),
+            ("budget.cap_usd", "0.05")
+        );
         assert_eq!(split_key_value("ui.theme"), ("ui.theme", ""));
     }
 }
