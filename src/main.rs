@@ -9,7 +9,11 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod config;
+mod budget;
 mod doctor;
+mod journal;
+mod provider;
+mod sli;
 
 pub const EXIT_OK: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
@@ -163,6 +167,7 @@ fn run(cli: &Cli) -> i32 {
             set,
         }) => cmd_config(&loader, show, validate, path, set),
         Some(Commands::Doctor) => cmd_doctor(&loader),
+        Some(Commands::Sli) => cmd_sli(&loader),
         Some(cmd) => not_yet(cmd),
     }
 }
@@ -275,6 +280,37 @@ fn cmd_doctor(loader: &config::Loader) -> i32 {
                 return EXIT_ERROR;
             }
             println!("curam doctor: all checks passed");
+        }
+    }
+    EXIT_OK
+}
+
+fn cmd_sli(loader: &config::Loader) -> i32 {
+    let cfg = loader.load();
+    match cfg {
+        Err(e) => {
+            eprintln!("{}", e.render());
+            return EXIT_USAGE;
+        }
+        Ok(c) => {
+            let db = config::expand_home(c.journal.path.as_str());
+            let j = journal::Journal::open(db, None);
+            match j {
+                Err(e) => {
+                    eprintln!("curam sli: {e}");
+                    return EXIT_ERROR;
+                }
+                Ok(mut jj) => {
+                    let evs = jj.events(None);
+                    match evs {
+                        Err(e) => {
+                            eprintln!("curam sli: {e}");
+                            return EXIT_ERROR;
+                        }
+                        Ok(rows) => println!("{}", sli::summary(&rows)),
+                    }
+                }
+            }
         }
     }
     EXIT_OK

@@ -1124,7 +1124,6 @@ pub fn scaffold(dir: &Path) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     /// The exact POC curam.toml (curam-harness) — the back-compat contract.
     const POC_TOML: &str = r#"default_provider = "openrouter"
