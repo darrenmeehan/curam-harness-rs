@@ -8,7 +8,12 @@
 //! same ChatMessage shape so the agent loop is mode-agnostic.
 
 use serde_json::Value;
+use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use super::config;
@@ -135,6 +140,72 @@ fn key_from_pi_auth(provider_name: &str) -> Option<String> {
     }
 }
 
+/// One chunk on a live provider stream (the chat_stream reader thread).
+#[derive(Debug)]
+pub struct StreamChunk {
+    pub kind: String, // "info" | "delta" | "done" | "error" | "cancelled"
+    pub text: String,
+}
+
+/// Live handle to an in-flight provider call. The reader runs on a worker
+/// thread; the caller pulls chunks with wait() and can cancel() at any point
+/// (TUI Ctrl-C). The reader checks the flag between reads.
+#[derive(Debug)]
+pub struct ChatStream {
+    pub cancel: Arc<AtomicBool>,
+    rx: mpsc::Receiver<StreamChunk>,
+}
+
+impl ChatStream {
+    /// Block up to ms milliseconds for the next chunk. None on timeout — the
+    /// caller decides whether to keep waiting, cancel, or drain other work.
+    pub fn wait(&self, ms: u64) -> Option<StreamChunk> {
+        self.rx.recv_timeout(Duration::from_millis(ms)).ok()
+    }
+
+    /// Request cancellation of the in-flight provider call.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Split one "delta" payload down to the token text when it is a standard
+/// chat.completion.chunk (choices[0].delta.content); otherwise pass the raw
+/// line through (provider-specific shapes still render).
+fn chunk_content(payload: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+    if let Some(c) = v.get("choices") {
+        if let Some(arr) = c.as_array() {
+            if let Some(first) = arr.first() {
+                if let Some(d) = first.get("delta") {
+                    if let Some(cont) = d.get("content") {
+                        if let Some(s) = cont.as_str() {
+                            return s.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    payload.to_string()
+}
+
+/// Emit one `data:` SSE line as a delta chunk (skips meta lines, [DONE]).
+fn emit_sse_line(line: &str, tx: &mpsc::Sender<StreamChunk>) {
+    if !line.starts_with("data:") {
+        return;
+    }
+    let payload = line[5..].trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return;
+    }
+    tx.send(StreamChunk {
+        kind: "delta".into(),
+        text: chunk_content(payload),
+    })
+        .ok();
+}
+
 impl Provider {
     /// Build a provider from the effective config. `provider_name` selects
     /// the [providers.*] entry; `model_override` swaps only the model
@@ -247,6 +318,151 @@ impl Provider {
         }
     }
 
+    /// Streaming variant of chat(): the request runs on a worker thread and
+    /// the caller pulls chunks with ChatStream::wait() — deltas as the SSE
+    /// lines arrive, then the assembled full body as "done". cancel() aborts
+    /// the in-flight call (TUI Ctrl-C); the worker notices between reads.
+    pub fn chat_stream(&self, messages: &[ApiMessage]) -> Result<ChatStream, ProviderError> {
+        let body = self.request_body(messages);
+        let url = format!("{}/chat/completions", self.base_url);
+        let (tx, rx) = mpsc::channel::<StreamChunk>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mode: String = if self.stream { "stream".into() } else { "plain".into() };
+        let base_url: String = self.base_url.clone();
+        let api_key: Option<String> = self.api_key.clone();
+        let agent = self.agent.clone();
+        let body_owned: String = body;
+        let url_owned: String = url;
+        let mode_owned: String = mode;
+        let cancel_shared: Arc<AtomicBool> = cancel.clone();
+        thread::spawn(move || {
+            let mut req = agent.post(url_owned).header("Content-Type", "application/json");
+            if let Some(k) = &api_key {
+                req = req.header("Authorization", format!("Bearer {}", k));
+            }
+            tx.send(StreamChunk {
+                kind: "info".into(),
+                text: mode_owned.clone(),
+            })
+                .ok();
+            let mut resp = match req.send(body_owned) {
+                Ok(r) => r,
+                Err(e) => {
+                    tx.send(StreamChunk {
+                        kind: "error".into(),
+                        text: format!(
+                            "provider unreachable ({}): {}",
+                            base_url, e
+                        )
+                        .to_string(),
+                    })
+                        .ok();
+                    return;
+                }
+            };
+            let status = resp.status().as_u16();
+            if !(200..300).contains(&status) {
+                let full = resp.body_mut().read_to_string().unwrap_or_default();
+                let head = if full.len() > SNIPPET_CHARS {
+                    full[0..SNIPPET_CHARS].to_string()
+                } else {
+                    full
+                };
+                tx.send(StreamChunk {
+                    kind: "error".into(),
+                    text: format!(
+                        "provider error {} ({}): {}",
+                        status, base_url, head
+                    )
+                    .to_string(),
+                })
+                    .ok();
+                return;
+            }
+            let mut rd = resp.body_mut().with_config().reader();
+            let mut full = String::new();
+            let mut whole = String::new(); // entire raw body (assembly input)
+            let mut carry: Vec<u8> = vec![];
+            let mut buf: [u8; 4096] = [0; 4096];
+            let stream: bool = mode_owned == "stream";
+            loop {
+                if cancel_shared.load(Ordering::Relaxed) {
+                    tx.send(StreamChunk {
+                        kind: "cancelled".into(),
+                        text: String::new(),
+                    })
+                        .ok();
+                    return;
+                }
+                match rd.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let mut all: Vec<u8> = vec![];
+                        for b in &carry {
+                            all.push(*b);
+                        }
+                        for i in 0..n {
+                            all.push(buf[i]);
+                        }
+                        carry = vec![];
+                        match String::from_utf8(all.clone()) {
+                            Err(_) => {
+                                // incomplete multibyte tail — carry to next read
+                                carry = all;
+                            }
+                            Ok(text) => {
+                                whole += text.as_str();
+                                if stream {
+                                    full += text.as_str();
+                                    let parts: Vec<&str> = full
+                                        .split('\n')
+                                        .collect::<Vec<&str>>();
+                                    if parts.len() > 1 {
+                                        for k in 0..(parts.len() - 1) {
+                                            emit_sse_line(parts[k], &tx);
+                                        }
+                                        full = parts[parts.len() - 1].to_string();
+                                    } else if !parts.is_empty() {
+                                        full = parts[0].to_string();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tx.send(StreamChunk {
+                            kind: "error".into(),
+                            text: format!(
+                                "provider read error ({}): {}",
+                                base_url, e
+                            )
+                            .to_string(),
+                        })
+                            .ok();
+                        return;
+                    }
+                }
+            }
+            if stream && !full.is_empty() {
+                whole += full.as_str(); // flush the trailing partial line
+            }
+            if !stream && !whole.is_empty() {
+                // non-SSE: one delta so the UI shows the body arriving
+                tx.send(StreamChunk {
+                    kind: "delta".into(),
+                    text: whole.clone(),
+                })
+                    .ok();
+            }
+            tx.send(StreamChunk {
+                kind: "done".into(),
+                text: whole.clone(),
+            })
+                .ok();
+        });
+        Ok(ChatStream { cancel, rx })
+    }
+
     /// Build the request body: {model, messages, stream, reasoning_effort?,
     /// max_tokens?}. Tools ride this seam in H3 (the plan's tool schemas).
     fn request_body(&self, messages: &[ApiMessage]) -> String {
@@ -286,7 +502,7 @@ impl Provider {
 }
 
 /// Parse a non-streaming /chat/completions response into a ChatMessage.
-fn parse_chat_json(text: &str) -> Result<ChatMessage, ProviderError> {
+pub fn parse_chat_json(text: &str) -> Result<ChatMessage, ProviderError> {
     let doc: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => {
@@ -366,7 +582,7 @@ fn usage_of(v: Option<&Value>) -> Option<Usage> {
 ///
 /// The full-body read happens first (H2); the progressive TUI reader wraps
 /// this same per-line logic in H5.
-fn assemble_sse(text: &str) -> Result<ChatMessage, ProviderError> {
+pub fn assemble_sse(text: &str) -> Result<ChatMessage, ProviderError> {
     let mut content: Option<String> = None;
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut usage: Option<Usage> = None;
@@ -502,6 +718,173 @@ mod tests {
         assert_eq!(msg.tool_calls[0].name, "read");
         assert_eq!(msg.tool_calls[0].arguments, "{\"path\":\"a.py\"}");
         assert_eq!(msg.usage.unwrap().completion_tokens, 5);
+    }
+
+    /// Serve a response in TWO chunked writes with a gap, so streaming reads
+    /// really arrive in stages (and a cancel can land between them).
+    fn serve_staged(first: &str, second: &str, gap_ms: u64) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let first_owned: String = first.to_string();
+        let second_owned: String = second.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut drain: [u8; 8192] = [0; 8192];
+            let _ = stream.read(&mut drain);
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let part1 = format!("{:x}\r\n{}\r\n", first_owned.len(), first_owned);
+            let part2 = format!("{:x}\r\n{}\r\n0\r\n\r\n", second_owned.len(), second_owned);
+            stream.write(head.as_bytes()).ok();
+            stream.write(part1.as_bytes()).ok();
+            stream.flush().ok();
+            std::thread::sleep(Duration::from_millis(gap_ms));
+            stream.write(part2.as_bytes()).ok();
+            stream.flush().ok();
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
+    fn sse_cfg(url: String) -> config::Config {
+        let mut cfg = test_cfg(url);
+        cfg.providers[0].stream = true;
+        cfg
+    }
+
+    #[test]
+    fn chat_stream_delivers_deltas_then_the_full_body() {
+        let mut sse = String::new();
+        sse.push_str("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n");
+        sse.push_str("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n");
+        sse.push_str("data: [DONE]\n");
+        let url = serve_staged(
+            &sse[0..sse.len() - 12].to_string(), // first two lines
+            &sse[sse.len() - 12..].to_string(), // "[DONE]\n"
+            30,
+        );
+        let p = Provider::new(&sse_cfg(url), None, None).unwrap();
+        let cs = p
+            .chat_stream(&[ApiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }])
+            .unwrap();
+        let mut kinds: Vec<String> = vec![];
+        let mut deltas: Vec<String> = vec![];
+        let mut full = String::new();
+        loop {
+            let ch = cs.wait(2000);
+            match ch {
+                None => break,
+                Some(c) => {
+                    kinds.push(c.kind.clone());
+                    if c.kind == "delta" {
+                        deltas.push(c.text.clone());
+                    }
+                    if c.kind == "done" {
+                        full = c.text;
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(kinds.iter().filter(|k| k.as_str() == "delta").count() >= 2, true);
+        assert_eq!(deltas.join(""), "Hello");
+        assert_eq!(assemble_sse(full.as_str()).unwrap().content.unwrap(), "Hello");
+    }
+
+    #[test]
+    fn chat_stream_plain_mode_parses_content_length_bodies() {
+        // serve() writes a single Content-Length body — the plain (non-SSE)
+        // path of the reader must deliver it byte-exact for the JSON parser.
+        let body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello there\"}}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}";
+        let url = serve(body, 200);
+        let p = Provider::new(&test_cfg(url), None, None).unwrap();
+        let cs = p
+            .chat_stream(&[ApiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }])
+            .unwrap();
+        let mut full = String::new();
+        loop {
+            match cs.wait(2000) {
+                None => break,
+                Some(c) => {
+                    if c.kind == "done" {
+                        full = c.text;
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            full.len(),
+            body.len(),
+            "reader must deliver the exact body: {full}"
+        );
+        assert_eq!(parse_chat_json(full.as_str()).unwrap().content.unwrap(), "hello there");
+    }
+
+    #[test]
+    fn chat_stream_cancel_aborts_before_the_second_burst() {
+        let mut sse = String::new();
+        sse.push_str("data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n");
+        sse.push_str("data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n");
+        sse.push_str("data: [DONE]\n");
+        let half = sse.len() / 2;
+        let url = serve_staged(&sse[0..half].to_string(), &sse[half..].to_string(), 400);
+        let p = Provider::new(&sse_cfg(url), None, None).unwrap();
+        let cs = p
+            .chat_stream(&[ApiMessage {
+                role: "user".into(),
+                content: "hi".into(),
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+            }])
+            .unwrap();
+        // info arrives first
+        assert_eq!(cs.wait(2000).unwrap().kind, "info");
+        // wait for the first burst's delta, then cancel before the second
+        let mut saw_delta = false;
+        for _ in 0..200 {
+            match cs.wait(25) {
+                None => continue,
+                Some(c) => {
+                    if c.kind == "delta" {
+                        saw_delta = true;
+                        break;
+                    }
+                    if c.kind == "done" || c.kind == "error" {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(saw_delta, true, "first burst rendered before cancel");
+        cs.cancel();
+        let mut saw_cancelled = false;
+        let mut saw_done = false;
+        for _ in 0..300 {
+            match cs.wait(25) {
+                None => continue,
+                Some(c) => {
+                    if c.kind == "cancelled" {
+                        saw_cancelled = true;
+                        break;
+                    }
+                    if c.kind == "done" {
+                        saw_done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(saw_cancelled, true, "cancel wins over the pending body");
+        assert_eq!(saw_done, false, "the second burst never gets consumed");
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod provider;
 mod sanitize;
 mod sli;
 mod tools;
+mod ui;
 mod util;
 
 pub const EXIT_OK: i32 = 0;

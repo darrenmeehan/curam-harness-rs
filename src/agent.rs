@@ -17,9 +17,11 @@ use super::config;
 use super::config::{PolicyRulesCfg, RunCfg};
 use super::journal::Journal;
 use super::policy;
-use super::provider::{ApiMessage, Provider, Usage};
+use super::provider::{ApiMessage, ChatMessage, Provider, ProviderError, Usage};
+use super::provider::{assemble_sse, parse_chat_json};
 use super::sanitize::Sanitizer;
 use super::tools as toolmod;
+use super::ui;
 use super::util::{mapof, mapof2};
 
 pub const MAX_ITERATIONS: usize = 25;
@@ -111,6 +113,9 @@ pub struct Agent {
     pub show_thinking: bool,
     pub show_commands: bool,
     pub auto_grant: bool,
+    /// When the TUI runs the agent, this bus streams events out and routes
+    /// ask replies back in (None = one-shot/REPL plain prints).
+    pub ui_bus: Option<ui::UiBus>,
     messages: Vec<ApiMessage>,
 }
 
@@ -138,6 +143,7 @@ impl Agent {
             show_thinking,
             show_commands,
             auto_grant,
+            ui_bus: None,
             messages: vec![ApiMessage {
                 role: "system".into(),
                 content: system_prompt(cfg),
@@ -190,7 +196,7 @@ impl Agent {
                 return Ok(Some(msg));
             }
 
-            let resp = self.provider.chat(&self.messages);
+            let resp = self.chat_with_stream();
             match resp {
                 Err(e) => {
                     journal.log("error", &Value::Object(mapof("error", e.msg.into())))?;
@@ -214,6 +220,13 @@ impl Agent {
                             cost.into(),
                         )),
                     )?;
+                    if let Some(b) = &self.ui_bus {
+                        let spent = round4(self.budget.spent_usd);
+                        let _ = b.send(
+                            "status",
+                            format!("cost=${:.2} spent=${}", cost, spent).to_string().as_str(),
+                        );
+                    }
 
                     if resp.tool_calls.is_empty() {
                         let answer = resp.content.unwrap_or_default();
@@ -246,6 +259,18 @@ impl Agent {
                                 serde_json::to_string(&args).expect("args json")
                             );
                         }
+                        if let Some(b) = &self.ui_bus {
+                            let _ = b.send(
+                                "tool",
+                                format!(
+                                    "{} {}",
+                                    tc.name,
+                                    serde_json::to_string(&args).expect("args json")
+                                )
+                                .to_string()
+                                .as_str(),
+                            );
+                        }
                         journal.log(
                             "tool_call",
                             &Value::Object(mapof2(
@@ -270,6 +295,14 @@ impl Agent {
                             println!(
                                 "\x1b[37m{}\x1b[0m",
                                 serde_json::to_string(&result).expect("result json")
+                            );
+                        }
+                        if let Some(b) = &self.ui_bus {
+                            let rj = serde_json::to_string(&result)
+                                .expect("result json");
+                            let _ = b.send(
+                                "result",
+                                format!("{} {}", tc.name, rj).to_string().as_str(),
                             );
                         }
 
@@ -341,8 +374,74 @@ impl Agent {
         Ok(Some(msg))
     }
 
+    /// Provider round-trip with the UI seam: pulls the live stream, forwards
+    /// deltas to the bus, and aborts when the UI cancels (Ctrl-C). The body
+    /// assembles exactly like chat() — assembly is downstream of streaming.
+    fn chat_with_stream(&self) -> Result<ChatMessage, ProviderError> {
+        let cs = self.provider.chat_stream(&self.messages);
+        match cs {
+            Err(e) => Err(e),
+            Ok(cs) => {
+                let mut mode: String = "plain".into();
+                let mut body = String::new();
+                loop {
+                    if let Some(b) = &self.ui_bus {
+                        if b.cancelled() {
+                            cs.cancel();
+                            return Err(ProviderError::new(
+                                "cancelled by user".into(),
+                            ));
+                        }
+                    }
+                    match cs.wait(40) {
+                        None => continue,
+                        Some(ch) => match ch.kind.as_str() {
+                            "info" => mode = ch.text.clone(),
+                            "delta" => {
+                                body += ch.text.as_str();
+                                if let Some(b) = &self.ui_bus {
+                                    let _ = b.send("delta", ch.text.as_str());
+                                }
+                            }
+                            "done" => {
+                                body = ch.text.clone();
+                                break;
+                            }
+                            "cancelled" => {
+                                return Err(ProviderError::new(
+                                    "cancelled by user".into(),
+                                ));
+                            }
+                            "error" => {
+                                return Err(ProviderError::new(ch.text.clone()));
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+                let mut parsed: Result<ChatMessage, ProviderError> =
+                    if mode == "stream" {
+                        assemble_sse(body.as_str())
+                    } else {
+                        parse_chat_json(body.as_str())
+                    };
+                // Lenient fallback: a provider that answers plain JSON to a
+                // stream request must not turn into an empty turn.
+                if mode == "stream" {
+                    if let Ok(m) = &parsed {
+                        if m.content.is_none() && m.tool_calls.is_empty() {
+                            parsed = parse_chat_json(body.as_str());
+                        }
+                    }
+                }
+                parsed
+            }
+        }
+    }
+
     /// Tool dispatch with policy gating — the only exec path (H3: file tools;
-    /// shell/run/ask/skills land in later phases).
+    /// shell/run/ask/skills land in later phases); shell/run/ask_human are
+    /// the H4 seam; skills in H6.
     fn execute_tool(&mut self, name: &str, args: &Value, journal: &mut Journal) -> Value {
         match name {
             "read" | "write" | "edit" => toolmod::run(&self.workdir, name, args),
@@ -362,14 +461,71 @@ impl Agent {
     }
 
     /// Approval gate: hard for policy-ask commands. Non-interactive without
-    /// auto_grant denies (POC parity); auto_grant auto-allows.
+    /// auto_grant denies (POC parity); auto_grant auto-allows. With a UI bus
+    /// the ask goes through the modal round-trip and the reply decides.
     fn approve(&mut self, cmd: &str, reason: &str, journal: &mut Journal) -> bool {
-        if !self.interactive && !self.auto_grant {
+        if let Some(b) = &self.ui_bus {
+            if self.auto_grant {
+                journal
+                    .log(
+                        "approval_granted",
+                        &Value::Object(mapof2(
+                            "command",
+                            cmd.into(),
+                            "reason",
+                            reason.into(),
+                        )),
+                    )
+                    .ok();
+                return true;
+            }
+            journal
+                .log(
+                    "approval_requested",
+                    &Value::Object(mapof2(
+                        "command",
+                        cmd.into(),
+                        "reason",
+                        reason.into(),
+                    )),
+                )
+                .ok();
+            let question = format!("{cmd}\n{reason}").to_string();
+            let answer = b.ask(question.as_str());
+            if answer.map(|a| a == "yes" || a == "allow" || a == "y").unwrap_or(false) {
+                journal
+                    .log(
+                        "approval_granted",
+                        &Value::Object(mapof2(
+                            "command",
+                            cmd.into(),
+                            "reason",
+                            reason.into(),
+                        )),
+                    )
+                    .ok();
+                true
+            } else {
+                journal
+                    .log(
+                        "tool_denied",
+                        &Value::Object(mapof2(
+                            "command",
+                            cmd.into(),
+                            "reason",
+                            "human denied".into(),
+                        )),
+                    )
+                    .ok();
+                false
+            }
+        } else if !self.interactive && !self.auto_grant {
             let _ = journal;
-            return false;
+            false
+        } else {
+            let grant = if self.auto_grant { Some(true) } else { None };
+            ask::ask_approval(journal, cmd, reason, grant).unwrap_or(false)
         }
-        let grant = if self.auto_grant { Some(true) } else { None };
-        ask::ask_approval(journal, cmd, reason, grant).unwrap_or(false)
     }
 
     /// shell: policy gate → approval → the cage. Verdict chains land in the
@@ -382,20 +538,31 @@ impl Agent {
                 let verdict = policy::check(cmd, &self.policy_rules);
                 match verdict.action.as_str() {
                     "deny" => {
-                        let _ = journal.log("tool_denied", &Value::Object(mapof2(
-                            "command", cmd.into(),
-                            "reason", verdict.evidence.clone().into(),
-                        )));
-                        return Self::denied(format!("{} (denied by policy: {})", cmd, verdict.evidence).as_str());
+                        let _ = journal.log(
+                            "tool_denied",
+                            &Value::Object(mapof2(
+                                "command",
+                                cmd.into(),
+                                "reason",
+                                verdict.evidence.clone().into(),
+                            )),
+                        );
+                        return Self::denied(
+                            format!("{} (denied by policy: {})", cmd, verdict.evidence).as_str(),
+                        );
                     }
-                    "ask"
-                        if !self.approve(cmd, verdict.evidence.as_str(), journal) => {
-                            let _ = journal.log("tool_denied", &Value::Object(mapof2(
-                                "command", cmd.into(),
-                                "reason", "non-interactive auto-deny".into(),
-                            )));
-                            return Self::denied("human denied");
-                        }
+                    "ask" if !self.approve(cmd, verdict.evidence.as_str(), journal) => {
+                        let _ = journal.log(
+                            "tool_denied",
+                            &Value::Object(mapof2(
+                                "command",
+                                cmd.into(),
+                                "reason",
+                                "non-interactive auto-deny".into(),
+                            )),
+                        );
+                        return Self::denied("human denied");
+                    }
                     _ => {}
                 }
                 let binds = toolmod::writable_binds(&self.workdir);
@@ -442,20 +609,31 @@ impl Agent {
                 );
                 match verdict.action.as_str() {
                     "deny" => {
-                        let _ = journal.log("tool_denied", &Value::Object(mapof2(
-                            "command", joined.clone().into(),
-                            "reason", verdict.evidence.clone().into(),
-                        )));
-                        return Self::denied(format!("{} (denied by policy: {})", joined, verdict.evidence).as_str());
+                        let _ = journal.log(
+                            "tool_denied",
+                            &Value::Object(mapof2(
+                                "command",
+                                joined.clone().into(),
+                                "reason",
+                                verdict.evidence.clone().into(),
+                            )),
+                        );
+                        return Self::denied(
+                            format!("{} (denied by policy: {})", joined, verdict.evidence).as_str(),
+                        );
                     }
-                    "ask"
-                        if !self.approve(joined.as_str(), verdict.evidence.as_str(), journal) => {
-                            let _ = journal.log("tool_denied", &Value::Object(mapof2(
-                                "command", joined.clone().into(),
-                                "reason", "non-interactive auto-deny".into(),
-                            )));
-                            return Self::denied("human denied");
-                        }
+                    "ask" if !self.approve(joined.as_str(), verdict.evidence.as_str(), journal) => {
+                        let _ = journal.log(
+                            "tool_denied",
+                            &Value::Object(mapof2(
+                                "command",
+                                joined.clone().into(),
+                                "reason",
+                                "non-interactive auto-deny".into(),
+                            )),
+                        );
+                        return Self::denied("human denied");
+                    }
                     _ => {}
                 }
                 let result = toolmod::tool_run(
@@ -478,9 +656,41 @@ impl Agent {
     }
 
     /// ask_human: judgment via the ask layer (non-interactive answers
-    /// without prompting, POC parity).
+    /// without prompting, POC parity). With a UI bus the question goes to the
+    /// modal and the user's typed reply (or option) comes back.
     fn tool_ask_human(&mut self, args: &Value, journal: &mut Journal) -> Value {
-        let q = args.get("question").and_then(|x| x.as_str()).unwrap_or_default();
+        let q = args
+            .get("question")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default();
+        if let Some(b) = &self.ui_bus {
+            let mut question = q.to_string();
+            if let Some(opts) = args.get("options").and_then(|o| o.as_array()) {
+                let joined = opts
+                    .iter()
+                    .filter_map(|o| o.as_str().map(str::to_string))
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                if !joined.is_empty() {
+                    question += format!(" | options: {}", joined).to_string().as_str();
+                }
+            }
+            let answer = b
+                .ask(question.as_str())
+                .unwrap_or("(no human: denied)".into());
+            journal
+                .log(
+                    "ask_human",
+                    &Value::Object(mapof2(
+                        "question",
+                        q.into(),
+                        "answer",
+                        answer.clone().into(),
+                    )),
+                )
+                .ok();
+            return Value::Object(mapof2("ok", true.into(), "answer", answer.into()));
+        }
         let answer = if !self.interactive && !self.auto_grant {
             Some("(non-interactive: no human)".into())
         } else if self.auto_grant {
@@ -498,7 +708,10 @@ fn journal_verdicts(journal: &mut Journal, args: &Value, result: &Value) {
     if result.get("verdicts").is_none() && result.get("cages").is_none() {
         return;
     }
-    let mut payload = mapof("command", serde_json::to_string(args).expect("args json").into());
+    let mut payload = mapof(
+        "command",
+        serde_json::to_string(args).expect("args json").into(),
+    );
     if let Some(vs) = result.get("verdicts").and_then(|v| v.as_array()) {
         if !vs.is_empty() {
             payload.insert("verdicts".to_owned(), vs.clone().into());
@@ -507,7 +720,11 @@ fn journal_verdicts(journal: &mut Journal, args: &Value, result: &Value) {
     if let Some(c) = result.get("cages").and_then(|v| v.as_array()) {
         payload.insert("cages".to_owned(), c.clone().into());
     }
-    if result.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+    if result
+        .get("timed_out")
+        .and_then(|t| t.as_bool())
+        .unwrap_or(false)
+    {
         payload.insert("timed_out".to_owned(), true.into());
     }
     if payload.len() > 1 {
@@ -515,13 +732,16 @@ fn journal_verdicts(journal: &mut Journal, args: &Value, result: &Value) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     fn test_cfg(base_url: String) -> config::Config {
         let mut cfg = config::Loader::new(None, None).load().unwrap();
@@ -599,6 +819,199 @@ mod tests {
             .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Serve an SSE body in two chunked writes with a gap (the reader
+    /// genuinely streams two bursts — exactly what cancel must interrupt).
+    fn staged_sse(first: &str, second: &str, gap_ms: u64) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let first_owned: String = first.to_string();
+        let second_owned: String = second.to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut drain: [u8; 8192] = [0; 8192];
+            let _ = stream.read(&mut drain);
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let part1 = format!("{:x}\r\n{}\r\n", first_owned.len(), first_owned);
+            let part2 = format!("{:x}\r\n{}\r\n0\r\n\r\n", second_owned.len(), second_owned);
+            stream.write(head.as_bytes()).ok();
+            stream.write(part1.as_bytes()).ok();
+            stream.flush().ok();
+            std::thread::sleep(Duration::from_millis(gap_ms));
+            stream.write(part2.as_bytes()).ok();
+            stream.flush().ok();
+        });
+        format!("http://127.0.0.1:{}", port)
+    }
+
+    #[test]
+    fn ui_stream_deltas_reach_the_bus_and_cancel_aborts() {
+        let dir = tmp_dir("uistream");
+        let burst1 = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n";
+        let burst2 = "data: {\"choices\":[{\"delta\":{\"content\":null}}]}\ndata: [DONE]\n";
+        let url = staged_sse(burst1, burst2, 400);
+        let mut cfg = test_cfg(url);
+        cfg.providers[0].stream = true;
+
+        let (tx, rx) = mpsc::channel::<ui::UiEv>();
+        let (reply_tx, reply_rx) = mpsc::channel::<String>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_owned: String = "stream me".into();
+        let cancel_worker: Arc<AtomicBool> = cancel.clone();
+        let dir_owned: std::path::PathBuf = dir.clone();
+        thread::spawn(move || {
+            let mut a = agent_for(&cfg, &dir_owned);
+            a.interactive = true;
+            a.ui_bus = Some(ui::UiBus {
+                tx,
+                reply_rx: Some(reply_rx),
+                cancel: cancel_worker,
+            });
+            let mut jj = Journal::open(dir_owned.join("j.db"), Some("sess".into())).unwrap();
+            let ans = a.run_task(task_owned.as_str(), &mut jj);
+            let out = match ans {
+                Ok(x) => x.unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            if let Some(b) = &a.ui_bus {
+                let _ = b.send("done", out.as_str());
+            }
+        });
+
+        // The mpsc::Receiver for UiEv is moved into the worker's UI bus, so
+        // consume it there — this test drives the bus from ANOTHER thread:
+        // first: deltas stream by; then cancel lands between the two bursts.
+        let mut saw_delta = false;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(60)) {
+                Ok(ev) => {
+                    if ev.kind == "delta" {
+                        saw_delta = true;
+                        break;
+                    }
+                    if ev.kind == "done" || ev.kind == "error" {
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        assert!(saw_delta, "the first burst rendered before the cancel");
+        cancel.store(true, Ordering::Relaxed);
+
+        // The run must abort: a "done" with an EMPTY answer, never a model
+        // message with the second burst's content.
+        let mut done_text: Option<String> = None;
+        for _ in 0..300 {
+            match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(ev) => {
+                    if ev.kind == "done" {
+                        done_text = Some(ev.text.clone());
+                        break;
+                    }
+                    if ev.kind == "error" {
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        assert_eq!(done_text.unwrap_or_default(), "", "run aborted, no answer");
+
+        // The journal carries the graceful abort (read from a second
+        // connection while the worker is gone).
+        let mut j2 = Journal::open(dir.join("j.db"), Some("sess".into())).unwrap();
+        let errs = j2.events(Some("error")).unwrap();
+        let cancelled = errs.iter().any(|e| {
+            serde_json::to_string(&e.payload)
+                .expect("json")
+                .contains("cancelled")
+        });
+        assert!(cancelled, "cancel surfaces as a journaled error, not a hang");
+        assert_eq!(j2.events(Some("model_message")).unwrap().len(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ui_ask_roundtrip_delivers_the_answer() {
+        let dir = tmp_dir("uiask");
+        let capture = dir.join("bodies.txt");
+        let ask_call = r#"{"choices":[{"message":{"role":"assistant","content":"Asking.","tool_calls":[{"id":"call_1","type":"function","function":{"name":"ask_human","arguments":"{\"question\":\"which color?\",\"options\":[\"red\",\"blue\"]}"}}]}}],"usage":{"prompt_tokens":4,"completion_tokens":3}}"#;
+        let answer = r#"{"choices":[{"message":{"role":"assistant","content":"Got it: red."}}],"usage":{"prompt_tokens":10,"completion_tokens":4}}"#;
+        let url = scripted(vec![ask_call.into(), answer.into()], &capture);
+        let cfg = test_cfg(url);
+
+        let (tx, rx) = mpsc::channel::<ui::UiEv>();
+        let (reply_tx, reply_rx) = mpsc::channel::<String>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let task_owned: String = "pick a color".into();
+        let cancel_worker: Arc<AtomicBool> = cancel.clone();
+        let dir_owned: std::path::PathBuf = dir.clone();
+        thread::spawn(move || {
+            let mut a = agent_for(&cfg, &dir_owned);
+            a.interactive = true;
+            a.ui_bus = Some(ui::UiBus {
+                tx,
+                reply_rx: Some(reply_rx),
+                cancel: cancel_worker,
+            });
+            let mut jj = Journal::open(dir_owned.join("j.db"), Some("sess".into())).unwrap();
+            let ans = a.run_task(task_owned.as_str(), &mut jj);
+            let out = match ans {
+                Ok(x) => x.unwrap_or_default(),
+                Err(_) => String::new(),
+            };
+            if let Some(b) = &a.ui_bus {
+                let _ = b.send("done", out.as_str());
+            }
+        });
+
+        // UI side: wait for the ask modal event, then answer "red" (= option
+        // text the modal sends back).
+        let mut asked = false;
+        for _ in 0..300 {
+            match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(ev) => {
+                    if ev.kind == "ask" {
+                        asked = true;
+                        reply_tx.send("red".into()).ok();
+                        break;
+                    }
+                    if ev.kind == "done" || ev.kind == "error" {
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        assert!(asked, "ask_human surfaced as a modal event");
+
+        let mut done_text: Option<String> = None;
+        for _ in 0..300 {
+            match rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(ev) => {
+                    if ev.kind == "done" {
+                        done_text = Some(ev.text.clone());
+                        break;
+                    }
+                    if ev.kind == "error" {
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        assert_eq!(done_text, Some("Got it: red.".into()));
+
+        let mut j2 = Journal::open(dir.join("j.db"), Some("sess".into())).unwrap();
+        let asks = j2.events(Some("ask_human")).unwrap();
+        assert_eq!(asks.len(), 1);
+        assert!(
+            serde_json::to_string(&asks[0].payload).expect("json").contains("red"),
+            "the human answer is journaled"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -689,7 +1102,9 @@ mod tests {
 
         let ds = j.events(Some("tool_denied")).unwrap();
         assert_eq!(ds.len(), 1);
-        assert!(serde_json::to_string(&ds[0].payload).expect("json").contains("rm -rf /"));
+        assert!(serde_json::to_string(&ds[0].payload)
+            .expect("json")
+            .contains("rm -rf /"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -716,7 +1131,9 @@ mod tests {
         // The cage verdict chain is in the journal (tool_verdicts).
         let vs = j.events(Some("tool_verdicts")).unwrap();
         assert_eq!(vs.len(), 1, "cage layers must be journaled");
-        assert!(serde_json::to_string(&vs[0].payload).expect("json").contains("bwrap"));
+        assert!(serde_json::to_string(&vs[0].payload)
+            .expect("json")
+            .contains("bwrap"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

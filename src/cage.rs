@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use super::config::{CageCfg, expand_home};
+use super::config::{expand_home, CageCfg};
 
 pub const ENVELOPE: &str = "cage/1";
 
@@ -83,11 +83,15 @@ fn path_search(bin: &str) -> Option<PathBuf> {
 impl Cage {
     /// A cage pinned to an explicit binary path (tests, unusual setups).
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { binary: path.into() }
+        Self {
+            binary: path.into(),
+        }
     }
 
     pub fn from_cfg(cfg: &CageCfg) -> Self {
-        Self { binary: resolve_binary(cfg) }
+        Self {
+            binary: resolve_binary(cfg),
+        }
     }
 
     pub fn available(&self) -> bool {
@@ -131,14 +135,29 @@ impl Cage {
         let cages: Vec<String> = v
             .get("cages")
             .and_then(|a| a.as_array())
-            .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         Some(CageResult {
             id: v.get("id").and_then(|x| x.as_u64()).unwrap_or(0),
             exit: v.get("exit").and_then(|x| x.as_u64()).unwrap_or(1) as u32,
-            stdout: v.get("stdout").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-            stderr: v.get("stderr").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-            timed_out: v.get("timed_out").and_then(|x| x.as_bool()).unwrap_or(false),
+            stdout: v
+                .get("stdout")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            stderr: v
+                .get("stderr")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            timed_out: v
+                .get("timed_out")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             cages,
             verdicts,
         })

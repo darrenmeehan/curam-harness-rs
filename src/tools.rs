@@ -6,7 +6,7 @@
 //! self-sandbox is a deferred release — the exec boundary is the cage).
 
 use serde_json::Value;
-use std::io::{Read};
+use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
@@ -168,7 +168,12 @@ pub fn tool_edit(workdir: &Path, args: &Value) -> Value {
 /// caches + credentials under $HOME, exactly like the POC's _cage_bind).
 pub fn writable_binds(workdir: &Path) -> Vec<String> {
     let home = std::env::var_os("HOME")
-        .map(|h| std::path::PathBuf::from(h).to_str().unwrap_or_default().to_string())
+        .map(|h| {
+            std::path::PathBuf::from(h)
+                .to_str()
+                .unwrap_or_default()
+                .to_string()
+        })
         .unwrap_or_default();
     let wd = workdir.to_str().unwrap_or_default().to_string();
     vec![format!("{}:{}", wd, wd), format!("{}:{}", home, home)]
@@ -180,7 +185,10 @@ fn cage_to_result(r: &cage::CageResult, timeout: u64) -> Value {
     if r.timed_out {
         let mut m = serde_json::Map::new();
         m.insert("ok".to_owned(), false.into());
-        m.insert("error".to_owned(), format!("timed out after {}s", timeout).into());
+        m.insert(
+            "error".to_owned(),
+            format!("timed out after {}s", timeout).into(),
+        );
         m.insert("stdout".to_owned(), r.stdout.clone().into());
         m.insert("stderr".to_owned(), r.stderr.clone().into());
         m.insert("timed_out".to_owned(), true.into());
@@ -216,7 +224,10 @@ pub fn tool_shell(
     match cmd {
         None => Ok(okish(false, "missing command")),
         Some(cmd) => {
-            let timeout = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(timeout_default);
+            let timeout = args
+                .get("timeout")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(timeout_default);
             let req = cage::CageRequest {
                 id: 0,
                 cmd: vec!["bash".into(), "-c".into(), cmd.to_string()],
@@ -262,10 +273,20 @@ pub fn tool_run(
             let argv = args
                 .get("argv")
                 .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|e| e.as_str().map(str::to_string)).collect::<Vec<_>>())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
-            let net = args.get("net").and_then(|n| n.as_bool()).unwrap_or(net_default);
-            let timeout = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(timeout_default);
+            let net = args
+                .get("net")
+                .and_then(|n| n.as_bool())
+                .unwrap_or(net_default);
+            let timeout = args
+                .get("timeout")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(timeout_default);
             let mut words = vec![program.to_string()];
             for w in argv {
                 words.push(w);
@@ -314,7 +335,14 @@ fn raw_fallback(program: String, argv: Vec<String>) -> Result<Value, String> {
         let _ = so.read_to_string(&mut out);
     }
     let status = child.wait().unwrap_or_default();
-    Ok(okish(false, format!("RAW fallback (unsandboxed!), exit {} — this is not how curam is meant to run", status.code().unwrap_or(1)).as_str()))
+    Ok(okish(
+        false,
+        format!(
+            "RAW fallback (unsandboxed!), exit {} — this is not how curam is meant to run",
+            status.code().unwrap_or(1)
+        )
+        .as_str(),
+    ))
 }
 
 /// Dispatch one tool call. Returns the result object the agent journals and
@@ -329,7 +357,12 @@ pub fn run(workdir: &Path, name: &str, args: &Value) -> Value {
 }
 
 pub fn is_known(name: &str) -> bool {
-    name == "read" || name == "write" || name == "edit" || name == "shell" || name == "run" || name == "ask_human"
+    name == "read"
+        || name == "write"
+        || name == "edit"
+        || name == "shell"
+        || name == "run"
+        || name == "ask_human"
 }
 
 #[cfg(test)]
@@ -412,7 +445,10 @@ mod tests {
         let binds = writable_binds(wd);
         let res = tool_shell(wd, &args, &cage, true, &binds, 60, false).unwrap();
         assert_eq!(res["ok"], false, "shell must fail closed without the cage");
-        assert!(res["error"].as_str().unwrap().contains("curam-run unavailable"));
+        assert!(res["error"]
+            .as_str()
+            .unwrap()
+            .contains("curam-run unavailable"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

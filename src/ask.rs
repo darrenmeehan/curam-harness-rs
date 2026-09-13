@@ -21,7 +21,9 @@ fn read_line() -> String {
 /// non-interactive / auto-granted path (returns it without prompting, so
 /// scripts never hang).
 fn prompt(question: &str, options: Option<&[&str]>, answer: Option<String>) -> String {
-    if let Some(a) = answer { return a }
+    if let Some(a) = answer {
+        return a;
+    }
     println!("\x1b[33m[curam:ask]\x1b[0m {}", question);
     match options {
         Some(opts) => {
@@ -41,7 +43,11 @@ fn prompt(question: &str, options: Option<&[&str]>, answer: Option<String>) -> S
         }
         None => {
             let raw = read_line();
-            if raw.is_empty() { "(no reply)".into() } else { raw }
+            if raw.is_empty() {
+                "(no reply)".into()
+            } else {
+                raw
+            }
         }
     }
 }
@@ -62,7 +68,10 @@ pub fn ask_judgment(
     }
     journal.log("ask_human", &Value::Object(m))?;
     let ans = prompt(question, options, answer);
-    journal.log("human_answer", &Value::Object(mapof("answer", ans.clone().into())))?;
+    journal.log(
+        "human_answer",
+        &Value::Object(mapof("answer", ans.clone().into())),
+    )?;
     Ok(ans)
 }
 
@@ -74,10 +83,10 @@ pub fn ask_approval(
     reason: &str,
     grant: Option<bool>,
 ) -> Result<bool, String> {
-    journal.log("approval_requested", &Value::Object(mapof2(
-        "command", command.into(),
-        "reason", reason.into(),
-    )))?;
+    journal.log(
+        "approval_requested",
+        &Value::Object(mapof2("command", command.into(), "reason", reason.into())),
+    )?;
     let granted = match grant {
         Some(g) => g,
         None => {
@@ -87,7 +96,11 @@ pub fn ask_approval(
         }
     };
     journal.log(
-        if granted { "approval_granted" } else { "tool_denied" },
+        if granted {
+            "approval_granted"
+        } else {
+            "tool_denied"
+        },
         &Value::Object(mapof2("command", command.into(), "reason", reason.into())),
     )?;
     Ok(granted)
@@ -100,16 +113,28 @@ pub fn ask_stuck(
     attempts: &[Value],
     answer: Option<String>,
 ) -> Result<String, String> {
-    journal.log("ask_human", &Value::Object(mapof2(
-        "kind", "stuck".into(),
-        "attempts", serde_json::Value::Array(attempts.to_vec()),
-    )))?;
+    journal.log(
+        "ask_human",
+        &Value::Object(mapof2(
+            "kind",
+            "stuck".into(),
+            "attempts",
+            serde_json::Value::Array(attempts.to_vec()),
+        )),
+    )?;
     let ans = prompt(
         "I've tried the same thing 3+ times. How should I proceed?",
-        Some(&["show me the failing output and I'll decide", "change approach yourself", "stop and summarize"]),
+        Some(&[
+            "show me the failing output and I'll decide",
+            "change approach yourself",
+            "stop and summarize",
+        ]),
         answer,
     );
-    journal.log("human_answer", &Value::Object(mapof("answer", ans.clone().into())))?;
+    journal.log(
+        "human_answer",
+        &Value::Object(mapof("answer", ans.clone().into())),
+    )?;
     Ok(ans)
 }
 
@@ -123,15 +148,23 @@ mod tests {
 
     #[test]
     fn approval_grant_and_deny_journal() {
-        let dir = std::env::temp_dir().join("curam-h4-a").join(format!("{}", std::process::id()));
+        let dir = std::env::temp_dir()
+            .join("curam-h4-a")
+            .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut j = journal_in(&dir);
         // grant path (auto_grant) logs approval_requested + approval_granted
-        assert_eq!(ask_approval(&mut j, "ls", "always-ask", Some(true)).unwrap(), true);
+        assert_eq!(
+            ask_approval(&mut j, "ls", "always-ask", Some(true)).unwrap(),
+            true
+        );
         assert_eq!(j.events(Some("approval_requested")).unwrap().len(), 1);
         assert_eq!(j.events(Some("approval_granted")).unwrap().len(), 1);
         // deny path logs tool_denied instead
-        assert_eq!(ask_approval(&mut j, "rm x", "always-ask", Some(false)).unwrap(), false);
+        assert_eq!(
+            ask_approval(&mut j, "rm x", "always-ask", Some(false)).unwrap(),
+            false
+        );
         assert_eq!(j.events(Some("tool_denied")).unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
