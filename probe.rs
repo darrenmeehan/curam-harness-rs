@@ -1,6 +1,6 @@
 use std::io::Read;
-use std::sync::{Arc, AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -16,11 +16,20 @@ fn main() {
         loop {
             match stream.read(&mut drain[total..]) {
                 Ok(0) => break,
-                Ok(n2) => { total += n2; if total >= drain.len() { break; } }
+                Ok(n2) => {
+                    total += n2;
+                    if total >= drain.len() {
+                        break;
+                    }
+                }
                 Err(_) => break,
             }
         }
-        println!("server read {} bytes: {}", total, std::string::String::from_utf8(drain[0..total.minimum(80)]).unwrap_or_default());
+        println!(
+            "server read {} bytes: {}",
+            total,
+            std::string::String::from_utf8(drain[0..total.minimum(80)]).unwrap_or_default()
+        );
         let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
         stream.write(headers.as_bytes()).ok();
         stream.write(body.as_bytes()).ok();
@@ -33,8 +42,16 @@ fn main() {
         .timeout_global(Some(Duration::from_secs(2)))
         .build()
         .into();
-    let mut resp = match agent.post(url).header("Content-Type", "application/json").send("{}") {
-        Ok(r) => r, Err(e) => { println!("send err: {e}"); return; }
+    let mut resp = match agent
+        .post(url)
+        .header("Content-Type", "application/json")
+        .send("{}")
+    {
+        Ok(r) => r,
+        Err(e) => {
+            println!("send err: {e}");
+            return;
+        }
     };
     let mut rd = resp.body_mut().with_config().reader();
     let mut all: Vec<u8> = vec![];
@@ -42,8 +59,15 @@ fn main() {
     loop {
         match rd.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => { for i in 0..n { all.push(buf[i]); } }
-            Err(e) => { println!("read err: {e}"); break; }
+            Ok(n) => {
+                for i in 0..n {
+                    all.push(buf[i]);
+                }
+            }
+            Err(e) => {
+                println!("read err: {e}");
+                break;
+            }
         }
     }
     let s = std::string::String::from_utf8(all).unwrap_or_default();

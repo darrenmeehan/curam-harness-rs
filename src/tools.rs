@@ -25,6 +25,7 @@ const SCHEMA_JSONS: &[&str] = &[
     "{\"type\":\"function\",\"function\":{\"name\":\"shell\",\"description\":\"Run a shell command in the workdir (sandboxed). Returns exit code, stdout, stderr.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\",\"description\":\"seconds, default 60\"}},\"required\":[\"command\"]}}}",
     "{\"type\":\"function\",\"function\":{\"name\":\"run\",\"description\":\"Run a program with explicit argv (typed exec, no shell). Sandboxed like shell.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\"},\"argv\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"timeout\":{\"type\":\"integer\"},\"net\":{\"type\":\"boolean\",\"description\":\"egress on/off (default from config)\"}},\"required\":[\"program\"]}}}",
     "{\"type\":\"function\",\"function\":{\"name\":\"ask_human\",\"description\":\"Ask the human for judgment (design fork, ambiguity, irreversible change, or when stuck). Use sparingly — for decisions only a human can make.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"question\":{\"type\":\"string\"},\"options\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"question\"]}}}",
+    "{\"type\":\"function\",\"function\":{\"name\":\"use_skill\",\"description\":\"Load a skill's full body into context (skills advertise only name + description in the system prompt; bodies load on demand).\",\"parameters\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"required\":[\"name\"]}}}",
 ];
 
 /// The schemas sent to the provider (built once; they never move).
@@ -455,7 +456,7 @@ mod tests {
     #[test]
     fn schemas_are_valid_json() {
         let s = schemas();
-        assert_eq!(s.len(), 6);
+        assert_eq!(s.len(), 7);
         assert_eq!(s[0]["function"]["name"], "read");
     }
 }

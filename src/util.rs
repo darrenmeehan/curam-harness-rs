@@ -15,3 +15,20 @@ pub fn mapof2(k1: &str, v1: Value, k2: &str, v2: Value) -> serde_json::Map<Strin
     m.insert(k2.to_owned(), v2);
     m
 }
+
+/// Build a four-key JSON object (skills, verdicts, ...).
+pub fn mapof4(
+    k1: &str,
+    v1: Value,
+    k2: &str,
+    v2: Value,
+    k3: &str,
+    v3: Value,
+    k4: &str,
+    v4: Value,
+) -> serde_json::Map<String, Value> {
+    let mut m = mapof2(k1, v1, k2, v2);
+    m.insert(k3.to_owned(), v3);
+    m.insert(k4.to_owned(), v4);
+    m
+}

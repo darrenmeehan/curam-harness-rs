@@ -13,6 +13,7 @@ use regex::Regex;
 use super::ask;
 use super::budget::Budget;
 use super::cage::Cage;
+use super::classifier::Classifier;
 use super::config;
 use super::config::{PolicyRulesCfg, RunCfg};
 use super::journal::Journal;
@@ -20,9 +21,10 @@ use super::policy;
 use super::provider::{assemble_sse, parse_chat_json};
 use super::provider::{ApiMessage, ChatMessage, Provider, ProviderError, Usage};
 use super::sanitize::Sanitizer;
+use super::skills::{self, catalog_block, find_skill, lint_skills, load_skills};
 use super::tools as toolmod;
 use super::ui;
-use super::util::{mapof, mapof2};
+use super::util::{mapof, mapof2, mapof4};
 
 pub const MAX_ITERATIONS: usize = 25;
 pub const STUCK_THRESHOLD: usize = 3;
@@ -116,6 +118,8 @@ pub struct Agent {
     /// When the TUI runs the agent, this bus streams events out and routes
     /// ask replies back in (None = one-shot/REPL plain prints).
     pub ui_bus: Option<ui::UiBus>,
+    skills: Vec<skills::Skill>,
+    clf: Classifier,
     messages: Vec<ApiMessage>,
 }
 
@@ -130,6 +134,25 @@ impl Agent {
         show_commands: bool,
         auto_grant: bool,
     ) -> Self {
+        let skills_dir = cfg.workdir.clone().join(cfg.agent.skills_dir.as_str());
+        let skills = load_skills(&skills_dir);
+        let evals_dir = cfg.workdir.clone().join("evals");
+        let lint = lint_skills(
+            &skills,
+            &evals_dir,
+            cfg.agent.skills_max_description_chars as usize,
+            cfg.agent.skills_max_body_lines as usize,
+        );
+        for w in &lint.warnings {
+            eprintln!("[curam] skill warning: {w}");
+        }
+        for e in &lint.errors {
+            eprintln!("[curam] skill error: {e}");
+        }
+        let clf = Classifier::from_cfg(cfg);
+        let mut sys_prompt = system_prompt(cfg);
+        let cat = catalog_block(&skills);
+        sys_prompt.push_str(cat.as_str());
         Self {
             workdir,
             provider,
@@ -144,9 +167,11 @@ impl Agent {
             show_commands,
             auto_grant,
             ui_bus: None,
+            skills,
+            clf,
             messages: vec![ApiMessage {
                 role: "system".into(),
-                content: system_prompt(cfg),
+                content: sys_prompt,
                 tool_call_id: None,
                 tool_calls: Vec::new(),
             }],
@@ -460,7 +485,7 @@ impl Agent {
             "shell" => self.tool_shell(args, journal),
             "run" => self.tool_run(args, journal),
             "ask_human" => self.tool_ask_human(args, journal),
-            "use_skill" => ok_false("skills land in H6 — not available yet"),
+            "use_skill" => self.tool_use_skill(args, journal),
             _ => toolmod::run(&self.workdir, name, args),
         }
     }
@@ -535,6 +560,18 @@ impl Agent {
         match cmd {
             None => ok_false("missing command"),
             Some(cmd) => {
+                // stage-2 classifier watch on the tool input — SCRUBBED first
+                // so no secret ever reaches the judge model (PII invariant).
+                if self.clf.enabled {
+                    let scrubbed = self.sanitizer.scrub(cmd);
+                    let (v, r) = self.clf.judge_command(scrubbed.as_str());
+                    if v != "benign" {
+                        let _ = journal.log(
+                            "classifier_flag",
+                            &super::classifier::flag_payload(v.as_str(), r.as_str(), "shell"),
+                        );
+                    }
+                }
                 let verdict = policy::check(cmd, &self.policy_rules);
                 match verdict.action.as_str() {
                     "deny" => {
@@ -700,6 +737,50 @@ impl Agent {
         };
         let ans = ask::ask_judgment(journal, q, None, answer).unwrap_or("(no reply)".into());
         serde_json::Value::Object(mapof2("ok", true.into(), "answer", ans.into()))
+    }
+
+    /// use_skill: load a skill's FULL body into context on demand
+    /// (progressive disclosure — only name+desc ever sit in the prompt).
+    fn tool_use_skill(&mut self, args: &Value, journal: &mut Journal) -> Value {
+        let name = args
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
+        match find_skill(&self.skills, name) {
+            None => ok_false(format!("unknown skill: {name}").to_string().as_str()),
+            Some(i) => {
+                self.skills[i].uses += 1;
+                let sk = &self.skills[i];
+                let sk_name = sk.name.clone();
+                let sk_body = sk.body.clone();
+                let _ = journal.log(
+                    "skill_used",
+                    &Value::Object(mapof4(
+                        "name",
+                        sk.name.clone().into(),
+                        "desc_chars",
+                        (sk.description_chars as u64).into(),
+                        "body_lines",
+                        (sk.body_lines as u64).into(),
+                        "uses",
+                        (sk.uses as u64).into(),
+                    )),
+                );
+                self.messages.push(ApiMessage {
+                    role: "user".into(),
+                    content: format!(
+                        "[skill:{sk_name}]
+{sk_body}"
+                    )
+                    .to_string(),
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                });
+                let mut m = mapof2("ok", true.into(), "name", sk_name.into());
+                m.insert("body".to_owned(), sk_body.into());
+                serde_json::Value::Object(m)
+            }
+        }
     }
 }
 

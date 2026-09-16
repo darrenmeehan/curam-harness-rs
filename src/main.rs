@@ -12,7 +12,10 @@ use std::io::stdin;
 use std::io::stdout;
 
 mod budget;
+mod classifier;
 mod provider;
+mod report;
+mod skills;
 use budget::Budget;
 use provider::Provider;
 
@@ -188,6 +191,7 @@ fn run(cli: &Cli) -> i32 {
         Some(Commands::Sli) => cmd_sli(&loader),
         Some(Commands::Tui) => run_tui(&loader, cli.no_stream),
         Some(Commands::Repl) => run_repl(&loader, cli.quiet, cli.no_stream),
+        Some(Commands::Report { since, json }) => cmd_report(&loader, since, json),
         Some(cmd) => not_yet(cmd),
     }
 }
@@ -264,6 +268,33 @@ fn run_tui(loader: &config::Loader, no_stream: bool) -> i32 {
         Err(code) => code,
         Ok(r) => tui::run(r.cfg, r.p, r.b, r.workdir, r.journal_path),
     }
+}
+
+fn cmd_report(loader: &config::Loader, since: &Option<String>, as_json: &bool) -> i32 {
+    let cfg = match loader.load() {
+        Err(e) => {
+            eprintln!("{}", e.render());
+            return EXIT_USAGE;
+        }
+        Ok(c) => c,
+    };
+    let db = config::expand_home(cfg.journal.path.as_str());
+    let db_str = db.to_str().unwrap_or_default();
+    let mut j = match journal::Journal::open(db.clone(), None) {
+        Err(e) => {
+            eprintln!("curam report: {e}");
+            return EXIT_ERROR;
+        }
+        Ok(x) => x,
+    };
+    let evs = j.events(None).unwrap_or(vec![]);
+    // borrow into the caller-owned Option<String> (no moved copy)
+    let since_arg: Option<&str> = match since {
+        Some(s) => Some(s.as_str()),
+        None => None,
+    };
+    println!("{}", report::render(&evs, db_str, since_arg, *as_json));
+    EXIT_OK
 }
 
 fn run_repl(loader: &config::Loader, quiet: bool, no_stream: bool) -> i32 {
