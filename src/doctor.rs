@@ -7,6 +7,7 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+use super::cage;
 use super::config;
 use super::config::expand_home;
 
@@ -77,7 +78,9 @@ pub fn run(cfg: &config::Config) -> Vec<Check> {
             out.push(Check {
                 name: "cage".into(),
                 ok: false,
-                detail: "curam-run not found — shell/run tools fail closed until it exists. "
+                detail: "curam-run not found on PATH — install it (it ships with \
+                    curam-security) or set CURAM_RUN_BIN; shell/run tools fail closed until \
+                    it exists"
                     .into(),
             });
         }
@@ -118,49 +121,11 @@ pub fn run(cfg: &config::Config) -> Vec<Check> {
     out
 }
 
-/// Resolve the cage binary: CURAM_RUN_BIN env > [cage] binary (path or on
-/// PATH) > the POC's default dev build path.
+/// Resolve the cage binary, sharing `cage::resolve_binary` so doctor and the
+/// exec path can never disagree about where `curam-run` is.
 fn resolve_cage_bin(cfg: &config::Config) -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("CURAM_RUN_BIN") {
-        return Some(PathBuf::from(p));
-    }
-    let from_cfg = expand_home(cfg.cage.binary.as_str());
-    let bin: String = format!("{from_cfg:?}");
-    if bin.contains('/') && from_cfg.exists() {
-        return Some(from_cfg);
-    }
-    if let Some(dir) = path_search(bin.as_str()) {
-        return Some(dir);
-    }
-    let dev = std::env::var_os("HOME")
-        .map(|h| {
-            PathBuf::from(h)
-                .join("code")
-                .join("curam-security")
-                .join("target")
-                .join("debug")
-                .join("curam-run")
-        })
-        .unwrap_or(PathBuf::from("/nonexistent/curam-run"));
-    if dev.exists() {
-        Some(dev)
-    } else {
-        None
-    }
-}
-
-fn path_search(bin: &str) -> Option<PathBuf> {
-    let path: String = std::env::var_os("PATH")
-        .map(|p| {
-            std::path::PathBuf::from(p)
-                .to_str()
-                .unwrap_or_default()
-                .to_string()
-        })
-        .unwrap_or_default();
-    path.split(':')
-        .map(|d| PathBuf::from(d).join(bin))
-        .find(|cand| cand.exists())
+    let bin = cage::resolve_binary(&cfg.cage);
+    bin.exists().then_some(bin)
 }
 
 #[cfg(test)]
@@ -180,9 +145,9 @@ mod tests {
     }
 
     #[test]
-    fn path_search_finds_bin_on_path() {
-        let found = path_search("sh");
-        assert!(found.is_some(), "sh must resolve on PATH");
+    fn bare_binary_resolves_through_path() {
+        let cfg = cfg_with_binary("sh");
+        assert!(resolve_cage_bin(&cfg).is_some(), "sh must resolve on PATH");
     }
 
     #[test]

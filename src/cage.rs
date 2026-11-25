@@ -45,30 +45,25 @@ pub struct Cage {
     pub binary: PathBuf,
 }
 
-/// Resolve the cage binary: CURAM_RUN_BIN env > [cage] binary (path or on
-/// PATH) > the POC default dev-build path.
+/// Resolve the cage binary: CURAM_RUN_BIN env > `[cage] binary`, used as a
+/// path when it contains a '/', otherwise looked up on PATH.
+///
+/// Nothing else is consulted. An unresolved name comes back unchanged so the
+/// caller reports it as missing: a released `curam` must never discover a
+/// developer's checkout under $HOME.
 pub fn resolve_binary(cfg: &CageCfg) -> PathBuf {
     if let Some(p) = std::env::var_os("CURAM_RUN_BIN") {
         return PathBuf::from(p);
     }
     let from_cfg = expand_home(cfg.binary.as_str());
-    let bin: String = format!("{from_cfg:?}");
-    if bin.contains('/') && from_cfg.exists() {
+    // to_string_lossy, not {:?}: Debug quotes a PathBuf, so the old
+    // format!("{from_cfg:?}") searched PATH for "\"curam-run\"" (with the
+    // quotes) and could never match. The $HOME dev-path fallback hid that.
+    let name = from_cfg.to_string_lossy().into_owned();
+    if name.contains('/') {
         return from_cfg;
     }
-    if let Some(dir) = path_search(bin.as_str()) {
-        return dir;
-    }
-    std::env::var_os("HOME")
-        .map(|h| {
-            PathBuf::from(h)
-                .join("code")
-                .join("curam-security")
-                .join("target")
-                .join("debug")
-                .join("curam-run")
-        })
-        .unwrap_or(PathBuf::from("/nonexistent/curam-run"))
+    path_search(&name).unwrap_or(from_cfg)
 }
 
 fn path_search(bin: &str) -> Option<PathBuf> {
@@ -264,19 +259,31 @@ mod tests {
         assert_eq!(v["net"], false);
     }
 
-    #[test]
-    fn resolve_finds_the_dev_build_or_path() {
-        // Either the POC dev path exists on this machine, or `sh` is on PATH.
-        let mut cfg = CageCfg {
-            binary: "curam-run".into(),
+    fn cage_cfg(binary: &str) -> CageCfg {
+        CageCfg {
+            binary: binary.into(),
             lists_dir: "~/.local/share/curam/lists".into(),
             geo: String::new(),
             fallback: "deny".into(),
-        };
-        let found = resolve_binary(&cfg);
-        assert!(found.exists(), "cage binary must resolve: {found:?}");
-        cfg.binary = "sh".into();
-        let sh = resolve_binary(&cfg);
-        assert!(sh.exists(), "sh must resolve via PATH");
+        }
+    }
+
+    #[test]
+    fn resolve_uses_path_for_a_bare_name() {
+        // Regression: the search name was built with {:?}, which quotes a
+        // PathBuf, so a bare name never matched anything on PATH.
+        let found = resolve_binary(&cage_cfg("sh"));
+        assert!(found.exists(), "sh must resolve via PATH, got {found:?}");
+    }
+
+    #[test]
+    fn resolve_never_invents_a_dev_path() {
+        let cfg = cage_cfg("curam-run-not-installed");
+        assert_eq!(
+            resolve_binary(&cfg),
+            PathBuf::from("curam-run-not-installed"),
+            "an unresolved name must come back unchanged"
+        );
+        assert!(!Cage::from_cfg(&cfg).available());
     }
 }

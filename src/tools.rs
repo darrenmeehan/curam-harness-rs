@@ -248,7 +248,7 @@ pub fn tool_shell(
                     } else {
                         Ok(okish(
                             false,
-                            "curam-run unavailable — build it: cargo build -p curam-run (in ~/code/curam-security) or set CURAM_RUN_BIN",
+                            "curam-run unavailable — install it on PATH (it ships with curam-security) or set CURAM_RUN_BIN",
                         ))
                     }
                 }
@@ -311,7 +311,7 @@ pub fn tool_run(
                     } else {
                         Ok(okish(
                             false,
-                            "curam-run unavailable — build it: cargo build -p curam-run (in ~/code/curam-security) or set CURAM_RUN_BIN",
+                            "curam-run unavailable — install it on PATH (it ships with curam-security) or set CURAM_RUN_BIN",
                         ))
                     }
                 }
