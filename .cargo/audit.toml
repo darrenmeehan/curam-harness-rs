@@ -1,0 +1,33 @@
+# cargo-audit suppressions.
+#
+# Every entry below is an "unmaintained" advisory (RUSTSEC *-unmaintained),
+# not a vulnerability: cargo-audit already exits 0 on them. The file exists to
+# keep the report readable and to record *why* each one stays. Re-check on every
+# dependency update: delete an entry as soon as upstream ships a replacement or
+# drops the crate. All nine arrive via the GPUI/accesskit stack added in H5;
+# none are first-party code.
+#
+# Note: cargo-audit only reads this from .cargo/audit.toml (or $CARGO_HOME),
+# not from a plain ./audit.toml.
+
+[advisories]
+ignore = [
+  # chrono: date/time crate, transitive via the GPUI stack. No CVE, only
+  # "no longer maintained". Replace when the tree moves to jiff or time.
+  "RUSTSEC-2026-0543",
+  # instant: wasm-oriented clock shim, transitive via the GPUI stack.
+  "RUSTSEC-2024-0384",
+  # paste: compile-time macro crate, transitive via the GPUI stack.
+  "RUSTSEC-2024-0436",
+  # rustls-pemfile: PEM loading, transitive via the GPUI stack's TLS.
+  "RUSTSEC-2025-0134",
+  # rustybuzz: font shaping, transitive via GPUI text layout.
+  "RUSTSEC-2026-0206",
+  # ttf-parser: font parsing, transitive via rustybuzz.
+  "RUSTSEC-2026-0192",
+  # zbus_names / zvariant / zvariant_derive: D-Bus AT-SPI accessibility
+  # support on Linux, transitive via accesskit.
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0372",
+]
