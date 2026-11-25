@@ -14,17 +14,26 @@ be cloned as a sibling of `curam-security`.
 | Phase | What | State |
 | --- | --- | --- |
 | H0 | curam-core split (curam-security workspace) | **done** |
-| H1 | CLI + config layering/validation + init + doctor | **done** (this repo) |
-| H2 | provider (ureq/SSE) + budget + journal | next |
-| H3–H7 | agent loop + tools, cage exec, TUI, report/sli, evals | planned |
+| H1 | CLI + config layering/validation + init + doctor | **done** |
+| H2–H4 | provider/budget/journal, agent loop + tools, caged exec | **done** |
+| H5 | front end: GPUI window + libghostty-vt transcript | **done** (replaces ratatui) |
+| H6 | skills + stage-2 classifier + report/sli | **done** |
+| H7 | evals | planned |
 
 ## Build & test
 
 ```bash
 cargo build        # produces target/debug/curam
-cargo test         # 13 unit tests: config golden/negative, POC back-compat,
-                   # layering, set_key, scaffold idempotence, doctor checks
+cargo test         # unit tests: config golden/negative, POC back-compat,
+                   # layering, set_key, scaffold idempotence, doctor checks,
+                   # tui state, ANSI sanitising
 ```
+
+The window front end links GPUI (via `gpui-kit`) and libghostty-vt (via
+`gpui-cn`'s `ghostty` feature). Building on Linux therefore needs
+`pkg-config`, fontconfig and freetype headers, Vulkan/X11 or Wayland, and
+Zig 0.17 — `ghostty-vt-sys` builds libghostty-vt from source there. On a Nix
+box: `nix-shell -p pkg-config fontconfig freetype libxkbcommon libxcb openssl zig`.
 
 ## Commands (H1)
 
@@ -33,7 +42,9 @@ curam "<task>"        one-shot task (agent loop lands in H3)
 curam init [DIR]      scaffold curam.toml + workdir/skills/ + workdir/evals/
 curam config --show|--validate|--path|--set KEY=VALUE
 curam doctor          preflight: config, cage binary, lists, terminal
-curam sli|report|evals|tasks|lists|tui|repl   registered, land with H5–H7
+curam tui             desktop window (gpui-kit) with a libghostty transcript
+curam repl            plain-ANSI fallback for no display / no tty
+curam sli|report|evals|tasks|lists   registered, land with H6–H7
 ```
 
 Config is layered TOML: defaults → `~/.config/curam/curam.toml` →

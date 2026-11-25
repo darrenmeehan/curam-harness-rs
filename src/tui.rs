@@ -1,32 +1,47 @@
-//! tui.rs — the full-screen ratatui front end (H5).
+//! tui.rs — the desktop front end (H5): gpui-kit + libghostty.
 //!
-//! Layout: conversation (left) + status rail (right) on top, input line
-//! below; asks replace the input area with a modal (y/n/a/Esc, or free
-//! text). Ctrl-b toggles the block-debug view. The agent runs on a worker
-//! thread fed by the ui::UiBus; Ctrl-C cancels the in-flight run
-//! gracefully (journaled error + back to input), a second Ctrl-C within 1s
-//! quits.
+//! One window. The transcript is a real terminal: libghostty-vt (via
+//! gpui-cn's `Terminal`) emulates the byte stream we write, so scrollback,
+//! selection, copy and the Kitty graphics protocol come from Ghostty's core
+//! instead of being reimplemented. The status rail and the prompt are
+//! gpui-kit components; an ask replaces the prompt with Allow / Session /
+//! Deny buttons, and typed text answers it.
+//!
+//! The agent runs on a worker thread fed by the ui::UiBus, so the window
+//! never blocks. Ctrl-C cancels the in-flight run; closing the window quits.
+//!
+//! The harness feeds the transcript with its own SGR bytes: agent text is
+//! untrusted (tool output can carry escape sequences), so every control
+//! character is dropped by [`clean`] before it reaches the emulator.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crossterm::event;
-use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::prelude as rp;
-use ratatui::prelude::Stylize;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use gpui_cn::terminal::{
+    Engine, EngineOptions, StreamPeer, StreamSource, Terminal, TerminalConfig, TerminalState,
+};
+use gpui_kit::base::StyledExt as _;
+use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::{
+    actions, div, px, AppContext as _, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    KeyBinding, ParentElement, Render, Styled, Window,
+};
 
 use super::budget::Budget;
 use super::config;
 use super::journal::Journal;
 use super::provider::Provider;
 use super::ui::{UiBus, UiEv};
-use ratatui::prelude::Line;
 
-const RAIL_W: u16 = 26;
+actions!(curam, [CancelRun]);
+
+const RAIL_W: f32 = 220.0;
+const MAX_ROWS: usize = 500;
+const MAX_CHARS: usize = 300;
 
 /// One visible conversation row (kind drives the colour + prefix).
 #[derive(Debug)]
@@ -46,33 +61,83 @@ pub struct Status {
     pub running: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AskPrompt {
     pub question: String,
     pub answer: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Input,
     Ask(AskPrompt),
-    Quit,
 }
 
-#[derive(Debug)]
-pub struct App {
-    pub rows: Vec<Row>,
-    pub status: Status,
-    pub input: String,
-    pub scroll: u16,
-    pub mode: Mode,
-    pub blocks: bool,
-    pub enter_pending: bool,
-    last_ctrl_c: Instant,
+/// What the transcript must draw for one applied event.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Out {
+    /// More bytes on the open line (a folded thinking delta).
+    Append(String),
+    /// A new line: kind + text.
+    Row(String, String),
 }
 
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+/// Printable copy of untrusted text: control characters dropped, capped.
+pub fn clean(text: &str, max: usize) -> String {
+    text.chars().filter(|c| !c.is_control()).take(max).collect()
+}
+
+/// SGR colour per row kind (the POC palette, ported).
+fn sgr(kind: &str) -> &'static str {
+    match kind {
+        "delta" | "thinking" => "\x1b[90m",
+        "tool" => "\x1b[36m",
+        "result" => "\x1b[37m",
+        "error" => "\x1b[31m",
+        "ask" | "stuck" => "\x1b[33m",
+        "answer" => "\x1b[32m",
+        _ => "",
+    }
+}
+
+/// Line prefix per row kind.
+fn marker(kind: &str) -> &'static str {
+    match kind {
+        "delta" | "thinking" => "… ",
+        "tool" => "▶ ",
+        "result" => "· ",
+        "error" => "✗ ",
+        "ask" | "stuck" => "? ",
+        "answer" => "→ ",
+        _ => "",
+    }
+}
+
+/// The terminal bytes for one event.
+fn bytes(out: &Out) -> String {
+    match out {
+        Out::Append(text) => format!("\x1b[90m{}\x1b[0m", clean(text, MAX_CHARS)),
+        Out::Row(kind, text) => format!(
+            "{}{}{}\x1b[0m",
+            sgr(kind),
+            marker(kind),
+            clean(text, MAX_CHARS)
+        ),
+    }
+}
+
+/// The pure view state: rows, status, ask. No gpui inside, so it tests
+/// without a window.
+#[derive(Debug)]
+pub struct App {
+    pub rows: Vec<Row>,
+    pub status: Status,
+    pub mode: Mode,
+    pub enter_pending: bool,
 }
 
 impl App {
@@ -93,12 +158,8 @@ impl App {
                 cage,
                 running: false,
             },
-            input: String::new(),
-            scroll: 0,
             mode: Mode::Input,
-            blocks: false,
             enter_pending: false,
-            last_ctrl_c: Instant::now(),
         }
     }
 
@@ -107,31 +168,31 @@ impl App {
             kind: kind.into(),
             text,
         });
-        self.scroll = 0; // follow the tail
+        // the terminal keeps the full history; the model only needs the tail
+        if self.rows.len() > MAX_ROWS {
+            self.rows.remove(0);
+        }
     }
 
-    /// Apply one agent event to the view state.
-    pub fn apply(&mut self, ev: &UiEv) {
+    /// Apply one agent event to the view state, and say what to draw.
+    pub fn apply(&mut self, ev: &UiEv) -> Option<Out> {
         match ev.kind.as_str() {
             "delta" => {
-                // fold the token stream into one dim block: append to the
-                // last row when it is already the open thinking block.
-                if !self.rows.is_empty() {
-                    let i = self.rows.len() - 1;
-                    if self.rows[i].kind == "delta" {
-                        let mut last_text: String = self.rows[i].text.clone();
-                        last_text.push_str(ev.text.as_str());
-                        self.rows[i] = Row {
-                            kind: "delta".into(),
-                            text: last_text,
-                        };
-                        return;
+                // fold the token stream into one dim block: extend the last
+                // row when it is already the open thinking block.
+                if let Some(last) = self.rows.last_mut() {
+                    if last.kind == "delta" {
+                        last.text.push_str(ev.text.as_str());
+                        return Some(Out::Append(ev.text.clone()));
                     }
                 }
                 self.push("delta", ev.text.clone());
+                Some(Out::Row("delta".into(), ev.text.clone()))
             }
-            "tool" => self.push("tool", ev.text.clone()),
-            "result" => self.push("result", ev.text.clone()),
+            "tool" | "result" | "error" | "answer" => {
+                self.push(ev.kind.as_str(), ev.text.clone());
+                Some(Out::Row(ev.kind.clone(), ev.text.clone()))
+            }
             "status" => {
                 let t = ev.text.as_str();
                 // "cost=0.12 spent=1.34"
@@ -142,278 +203,332 @@ impl App {
                     self.status.spent = spent_s.parse::<f64>().unwrap_or(0.0);
                     self.status.iterations += 1;
                 }
+                None
             }
             "ask" | "stuck" => {
-                self.push(ev.kind.clone().as_str(), ev.text.clone());
+                self.push(ev.kind.as_str(), ev.text.clone());
                 self.mode = Mode::Ask(AskPrompt {
                     question: ev.text.clone(),
                     answer: String::new(),
                 });
+                Some(Out::Row(ev.kind.clone(), ev.text.clone()))
             }
-            "error" => self.push("error", ev.text.clone()),
-            "answer" => self.push("answer", ev.text.clone()),
             "done" => {
                 self.status.running = false;
-                if !ev.text.is_empty() {
+                if ev.text.is_empty() {
+                    None
+                } else {
                     self.push("answer", ev.text.clone());
+                    Some(Out::Row("answer".into(), ev.text.clone()))
                 }
             }
-            _ => {}
-        }
-    }
-
-    /// Cap the rendered inbox so a very long run cannot grow it forever.
-    pub fn capped_rows(&self) -> Vec<&Row> {
-        let n = self.rows.len();
-        let start = n.saturating_sub(500);
-        let mut out: Vec<&Row> = vec![];
-        for i in start..n {
-            out.push(&self.rows[i]);
-        }
-        out
-    }
-
-    /// Dispatch one key event. Returns the reply for the worker's ask
-    /// channel, or None. Mutates the view (input, scroll, mode, cancel).
-    pub fn on_key(
-        &mut self,
-        key: KeyCode,
-        modifiers: KeyModifiers,
-        cancel: &Arc<AtomicBool>,
-    ) -> Option<String> {
-        // Ctrl-C: first cancels the in-flight run (or arms the quit
-        // window), the second within 1s quits.
-        if modifiers.contains(KeyModifiers::CONTROL) && key == KeyCode::Char('c') {
-            let now = Instant::now();
-            if now - self.last_ctrl_c <= Duration::from_millis(1000) {
-                self.mode = Mode::Quit;
-            } else {
-                self.last_ctrl_c = now;
-                cancel.store(true, Ordering::Relaxed);
-            }
-            return None;
-        }
-        if modifiers.contains(KeyModifiers::CONTROL) && key == KeyCode::Char('b') {
-            self.blocks = !self.blocks;
-            return None;
-        }
-        match self.mode {
-            Mode::Quit => None,
-            Mode::Ask(_) => match key {
-                KeyCode::Char(c) if c == 'y' => {
-                    self.mode = Mode::Input;
-                    Some("yes".into())
-                }
-                KeyCode::Char(c) if c == 'n' => {
-                    self.mode = Mode::Input;
-                    Some("no".into())
-                }
-                KeyCode::Char(c) if c == 'a' => {
-                    self.mode = Mode::Input;
-                    Some("allow".into())
-                }
-                KeyCode::Char(c) => {
-                    let mut a: String = self.ask_answer();
-                    a.push_str(c.to_string().as_str());
-                    if let Mode::Ask(p) = &mut self.mode {
-                        p.answer = a;
-                    }
-                    None
-                }
-                KeyCode::Enter => {
-                    // typed free-text reply (or yes on empty → approval)
-                    let answer = self.ask_answer();
-                    self.mode = Mode::Input;
-                    Some(if answer.is_empty() {
-                        "yes".into()
-                    } else {
-                        answer
-                    })
-                }
-                KeyCode::Backspace => {
-                    if let Mode::Ask(p) = &mut self.mode {
-                        let a = p.answer.clone();
-                        if !a.is_empty() {
-                            p.answer = a[0..a.len() - 1].to_string();
-                        }
-                    }
-                    None
-                }
-                KeyCode::Esc => {
-                    self.mode = Mode::Input;
-                    Some("no".into())
-                }
-                _ => None,
-            },
-            Mode::Input => match key {
-                KeyCode::Enter if !self.input.is_empty() && !self.status.running => {
-                    self.enter_pending = true;
-                    None
-                }
-                KeyCode::Char(c) => {
-                    self.input.push_str(c.to_string().as_str());
-                    None
-                }
-                KeyCode::Backspace => {
-                    if !self.input.is_empty() {
-                        self.input = self.input[0..self.input.len() - 1].to_string();
-                    }
-                    None
-                }
-                KeyCode::Esc => {
-                    self.input = String::new();
-                    None
-                }
-                KeyCode::PageUp => {
-                    self.scroll += 4;
-                    None
-                }
-                KeyCode::PageDown => {
-                    self.scroll = self.scroll.saturating_sub(4);
-                    None
-                }
-                _ => None,
-            },
-        }
-    }
-
-    fn ask_answer(&self) -> String {
-        match &self.mode {
-            Mode::Ask(p) => p.answer.clone(),
-            _ => String::new(),
-        }
-    }
-
-    /// Render the whole screen into the frame.
-    pub fn render(&mut self, frame: &mut rp::Frame) {
-        let area = frame.area();
-        let layout = rp::Layout::vertical([rp::Constraint::Fill(1), rp::Constraint::Length(3)]);
-        let areas = layout.split(area);
-        let convo = areas[0];
-        let bottom = areas[1];
-
-        // bottom row: input prompt or ask modal
-        let ask_mode = match &self.mode {
-            Mode::Ask(p) => Some(p),
             _ => None,
+        }
+    }
+
+    /// Answer the open ask, leaving ask mode. None when no ask is open.
+    pub fn reply(&mut self, answer: &str) -> Option<String> {
+        if matches!(&self.mode, Mode::Ask(_)) {
+            self.mode = Mode::Input;
+            return Some(answer.to_string());
+        }
+        None
+    }
+
+    /// Status rail: provider/model, cost, iterations, cage, mode.
+    pub fn rail(&self) -> Vec<String> {
+        vec![
+            format!("curam {}", env!("CARGO_PKG_VERSION")),
+            format!("{}  {}", self.status.provider, self.status.model),
+            format!(
+                "cost=${}  spent=${}",
+                round2(self.status.cost),
+                round2(self.status.spent)
+            ),
+            format!("iterations {}", self.status.iterations),
+            format!("cage {}", self.status.cage),
+            format!(
+                "mode {}",
+                if self.status.running {
+                    "working"
+                } else {
+                    "idle"
+                }
+            ),
+        ]
+    }
+}
+
+/// The window: the pure state, the terminal that draws the transcript, and
+/// the worker channels.
+struct View {
+    app: App,
+    terminal: gpui_kit::Entity<TerminalState>,
+    peer: StreamPeer,
+    input: gpui_kit::Entity<InputState>,
+    ui_rx: mpsc::Receiver<UiEv>,
+    cancel: Arc<AtomicBool>,
+    reply_tx: Option<mpsc::Sender<String>>,
+    cfg: config::Config,
+    provider: Provider,
+    budget: Budget,
+    workdir: std::path::PathBuf,
+    journal_path: std::path::PathBuf,
+    agent_tx: mpsc::Sender<UiEv>,
+    line_open: bool,
+}
+
+impl View {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cfg: config::Config,
+        provider: Provider,
+        budget: Budget,
+        workdir: std::path::PathBuf,
+        journal_path: std::path::PathBuf,
+        agent_tx: mpsc::Sender<UiEv>,
+        ui_rx: mpsc::Receiver<UiEv>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let app = App::new(&cfg, &provider, &budget);
+
+        let (source, peer) = StreamSource::new();
+        let terminal = cx.new(|cx| {
+            TerminalState::new(
+                Engine::new(source, EngineOptions::default()),
+                TerminalConfig::default(),
+                window,
+                cx,
+            )
+        });
+        cx.observe(&terminal, |_, _, cx| cx.notify()).detach();
+
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("curam> describe a task"));
+        cx.subscribe(&input, |this: &mut Self, _, ev: &InputEvent, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.app.enter_pending = true;
+                cx.notify();
+            }
+        })
+        .detach();
+        input.update(cx, |state, cx| state.focus(window, cx));
+
+        // Drain the agent's events on a timer: the worker is a thread, the
+        // window must never block on it.
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(30))
+                .await;
+            if this
+                .update_in(cx, |view, window, cx| view.pump(window, cx))
+                .is_err()
+            {
+                break;
+            }
+        })
+        .detach();
+
+        Self {
+            app,
+            terminal,
+            peer,
+            input,
+            ui_rx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            reply_tx: None,
+            cfg,
+            provider,
+            budget,
+            workdir,
+            journal_path,
+            agent_tx,
+            line_open: false,
+        }
+    }
+
+    /// Apply queued agent events, then act on a parked Enter.
+    fn pump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut dirty = false;
+        loop {
+            match self.ui_rx.try_recv() {
+                Ok(ev) => {
+                    if let Some(out) = self.app.apply(&ev) {
+                        self.write(&out);
+                    }
+                    dirty = true;
+                }
+                Err(_) => break,
+            }
+        }
+        if self.app.enter_pending {
+            self.app.enter_pending = false;
+            self.submit(window, cx);
+            dirty = true;
+        }
+        if dirty {
+            cx.notify();
+        }
+    }
+
+    /// Write one event's bytes into the terminal, opening a line first when
+    /// the event starts a new row.
+    fn write(&mut self, out: &Out) {
+        let mut chunk = String::new();
+        if !matches!(out, Out::Append(_)) {
+            if self.line_open {
+                chunk.push_str("\r\n");
+            }
+            self.line_open = true;
+        }
+        chunk.push_str(&bytes(out));
+        self.peer.output(chunk.as_bytes());
+    }
+
+    /// Enter, or a click: run the typed task, or answer the open ask.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).value().trim().to_string();
+        if matches!(&self.app.mode, Mode::Ask(_)) {
+            let answer = if text.is_empty() {
+                "yes".to_string()
+            } else {
+                text
+            };
+            self.reply(&answer, cx);
+            self.input
+                .update(cx, |state, cx| state.set_value("", window, cx));
+            return;
+        }
+        if text.is_empty() || self.app.status.running {
+            return;
+        }
+        self.input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.start(text, cx);
+    }
+
+    /// Spawn one task run on a worker thread; its events come back on ui_rx.
+    fn start(&mut self, task: String, cx: &mut Context<Self>) {
+        self.app.push("user", task.clone());
+        let out = Out::Row("user".into(), task.clone());
+        self.write(&out);
+        self.app.status.running = true;
+        self.cancel.store(false, Ordering::Relaxed);
+        let (reply_tx, reply_rx) = mpsc::channel::<String>();
+        self.reply_tx = Some(reply_tx);
+        spawn_task(
+            self.cfg.clone(),
+            self.provider.clone(),
+            self.budget.clone(),
+            self.workdir.clone(),
+            self.journal_path.clone(),
+            task,
+            self.agent_tx.clone(),
+            reply_rx,
+            self.cancel.clone(),
+        );
+        cx.notify();
+    }
+
+    fn reply(&mut self, answer: &str, cx: &mut Context<Self>) {
+        if let Some(reply) = self.app.reply(answer) {
+            if let Some(tx) = &self.reply_tx {
+                let _ = tx.send(reply);
+            }
+        }
+        cx.notify();
+    }
+
+    fn answer_allow(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.reply("yes", cx);
+    }
+
+    fn answer_session(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.reply("allow", cx);
+    }
+
+    fn answer_deny(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.reply("no", cx);
+    }
+
+    /// Ctrl-C: stop the in-flight run; the worker journals its own error.
+    fn cancel_run(&mut self, _: &CancelRun, _: &mut Window, _: &mut Context<Self>) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Render for View {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let rail = self.app.rail();
+        let bottom = match self.app.mode.clone() {
+            Mode::Ask(p) => div()
+                .h_flex()
+                .items_center()
+                .gap_2()
+                .p_2()
+                .child(div().flex_1().child(p.question))
+                .child(
+                    Button::new("allow")
+                        .label("Allow")
+                        .on_click(cx.listener(Self::answer_allow)),
+                )
+                .child(
+                    Button::new("session")
+                        .outline()
+                        .label("Session")
+                        .on_click(cx.listener(Self::answer_session)),
+                )
+                .child(
+                    Button::new("deny")
+                        .outline()
+                        .label("Deny")
+                        .on_click(cx.listener(Self::answer_deny)),
+                ),
+            Mode::Input => {
+                let hint = if self.app.status.running {
+                    "running — Ctrl-C cancels"
+                } else {
+                    "Enter runs · Ctrl-C cancels"
+                };
+                div()
+                    .h_flex()
+                    .items_center()
+                    .gap_2()
+                    .p_2()
+                    .child(div().flex_1().child(Input::new(&self.input).id("prompt")))
+                    .child(div().child(hint))
+            }
         };
-        if let Some(p) = ask_mode {
-            let text = format!(
-                "{}\n[y] allow  [n] deny  [a] allow-session  [Esc] deny  — reply: {}",
-                p.question.clone(),
-                p.answer.clone()
-            );
-            frame.render_widget(
-                Paragraph::new(text.as_str())
-                    .wrap(Wrap { trim: true })
-                    .block(Block::new().borders(Borders::ALL).title(" curam ")),
-                bottom,
-            );
-        } else {
-            let prompt = if self.status.running {
-                "[running — Ctrl-C to cancel]".into()
-            } else {
-                format!("curam> {}", self.input.clone())
-            };
-            frame.render_widget(
-                Paragraph::new(prompt.as_str())
-                    .wrap(Wrap { trim: true })
-                    .block(Block::new().borders(Borders::ALL).title(" curam ")),
-                bottom,
-            );
-        }
 
-        // conversation + status rail
-        let row_layout =
-            rp::Layout::horizontal([rp::Constraint::Fill(1), rp::Constraint::Length(RAIL_W)]);
-        let row_areas = row_layout.split(convo);
-        let main_area = row_areas[0];
-        let rail_area = row_areas[1];
-
-        let lines: Vec<Line<'static>> = self
-            .capped_rows()
-            .iter()
-            .map(|row| line_for(&row.kind, &row.text))
-            .collect::<Vec<rp::Line>>();
-        frame.render_widget(
-            Paragraph::new(rp::Text::from(lines))
-                .wrap(Wrap { trim: true })
-                .scroll((self.scroll, 0)),
-            main_area,
-        );
-
-        let rail = rail_lines(&self.status, self.blocks);
-        frame.render_widget(
-            Paragraph::new(rp::Text::from(rail))
-                .block(Block::new().borders(Borders::ALL).title(" status ")),
-            rail_area,
-        );
-
-        // cursor at the end of the input line
-        if !self.status.running {
-            let w = bottom.width.saturating_sub(2) as usize;
-            let x = if 10 + self.input.len() < w {
-                10 + self.input.len()
-            } else {
-                w
-            };
-            frame.set_cursor(x as u16, bottom.y + 1);
-        }
+        div()
+            .size_full()
+            .v_flex()
+            .on_action(cx.listener(Self::cancel_run))
+            .child(
+                div()
+                    .flex_1()
+                    .h_flex()
+                    .child(
+                        Terminal::new("transcript", &self.terminal)
+                            .h_full()
+                            .flex_1(),
+                    )
+                    .child(
+                        div()
+                            .w(px(RAIL_W))
+                            .h_full()
+                            .p_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(
+                                rail.into_iter()
+                                    .map(|line| div().child(gpui_kit::SharedString::from(line))),
+                            ),
+                    ),
+            )
+            .child(bottom)
     }
-}
-
-/// Style one transcript row by kind (the POC palette, ported).
-fn line_for(kind: &str, text: &str) -> Line<'static> {
-    let mut t: String = text.to_string();
-    if t.len() > 300 {
-        t = t[0..300].to_string();
-    }
-    match kind {
-        "delta" => rp::Line::from(format!("… {}", t).to_string()).dark_gray(),
-        "thinking" => rp::Line::from(format!("… {}", t).to_string()).dim(),
-        "tool" => rp::Line::from(format!("▶ {}", t).to_string()).cyan(),
-        "result" => rp::Line::from(format!("· {}", t).to_string()).gray(),
-        "error" => rp::Line::from(format!("✗ {}", t).to_string()).red(),
-        "ask" | "stuck" => rp::Line::from(format!("? {}", t).to_string()).yellow(),
-        "answer" => rp::Line::from(format!("→ {}", t).to_string()).green(),
-        _ => rp::Line::from(text.to_string()),
-    }
-}
-
-/// Status rail: provider/model, cost, iterations, cage, mode.
-fn rail_lines(status: &Status, blocks: bool) -> Vec<Line<'static>> {
-    let ver: &str = env!("CARGO_PKG_VERSION");
-    let mode: String = if status.running {
-        "working".into()
-    } else {
-        "idle".into()
-    };
-    let cost = round2(status.cost);
-    let spent = round2(status.spent);
-    let prov: String = status.provider.clone();
-    let model: String = status.model.clone();
-    let cage: String = status.cage.clone();
-    let iters = status.iterations;
-    let block_hint: String = if blocks {
-        "block view ON".into()
-    } else {
-        "Ctrl-b: blocks".into()
-    };
-    let l1: String = format!("curam {}", ver);
-    let l2: String = format!("{}  {}", prov, model);
-    let l3: String = format!("cost=${}  spent=${}", cost, spent);
-    let l4: String = format!("iterations {}", iters);
-    let l5: String = format!("cage {}", cage);
-    let l6: String = format!("mode {}", mode);
-    vec![
-        rp::Line::from(l1).bold(),
-        rp::Line::from(l2).cyan(),
-        rp::Line::from(l3).yellow(),
-        rp::Line::from(l4),
-        rp::Line::from(l5).dark_gray(),
-        rp::Line::from(l6),
-        rp::Line::from(block_hint).gray(),
-    ]
 }
 
 /// Spawn one task run. Owns the journal; streams events to the UI bus.
@@ -429,62 +544,40 @@ pub fn spawn_task(
     cancel: Arc<AtomicBool>,
 ) {
     let cancel_worker: Arc<AtomicBool> = cancel.clone();
-    let my_tx = agent_tx.clone();
-    let cfg_owned: config::Config = cfg;
-    let task_owned: String = task;
     thread::spawn(move || {
         let mut jj = Journal::open(journal_path, None).unwrap();
-        let mut a = super::agent::Agent::new(
-            &cfg_owned, provider, budget, workdir, true, false, false, false,
-        );
+        let mut a =
+            super::agent::Agent::new(&cfg, provider, budget, workdir, true, false, false, false);
         a.ui_bus = Some(UiBus {
-            tx: agent_tx,
+            tx: agent_tx.clone(),
             reply_rx: Some(agent_reply_rx),
             cancel: cancel_worker,
         });
-        let ans = a.run_task(task_owned.as_str(), &mut jj);
+        let ans = a.run_task(task.as_str(), &mut jj);
         match ans {
-            Err(e) => {
-                let _ = my_tx
-                    .send(UiEv {
-                        kind: "error".into(),
-                        text: e,
-                    })
-                    .ok();
-                let _ = my_tx
-                    .send(UiEv {
-                        kind: "done".into(),
-                        text: String::new(),
-                    })
-                    .ok();
-            }
-            Ok(None) => {
-                let _ = my_tx
-                    .send(UiEv {
-                        kind: "done".into(),
-                        text: String::new(),
-                    })
-                    .ok();
-            }
             Ok(Some(text)) => {
-                let _ = my_tx
-                    .send(UiEv {
-                        kind: "answer".into(),
-                        text: text.clone(),
-                    })
-                    .ok();
-                let _ = my_tx
-                    .send(UiEv {
-                        kind: "done".into(),
-                        text: String::new(),
-                    })
-                    .ok();
+                let _ = agent_tx.send(UiEv {
+                    kind: "answer".into(),
+                    text,
+                });
             }
+            Err(e) => {
+                let _ = agent_tx.send(UiEv {
+                    kind: "error".into(),
+                    text: e,
+                });
+            }
+            Ok(None) => {}
         }
+        // "done" always closes the run, error or not (it clears `running`).
+        let _ = agent_tx.send(UiEv {
+            kind: "done".into(),
+            text: String::new(),
+        });
     });
 }
 
-/// The TUI event loop. Returns the process exit code (0 ok, 1 runtime).
+/// Open the curam window. Returns the process exit code (0 ok, 1 no display).
 pub fn run(
     cfg: config::Config,
     provider: Provider,
@@ -492,87 +585,41 @@ pub fn run(
     workdir: std::path::PathBuf,
     journal_path: std::path::PathBuf,
 ) -> i32 {
-    let mut terminal = match ratatui::try_init() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("curam tui: terminal init failed: {e}");
-            return 1;
-        }
-    };
-    let (agent_tx, ui_rx) = mpsc::channel::<UiEv>();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let mut active_reply_tx: Option<mpsc::Sender<String>> = None;
-    let mut app = App::new(&cfg, &provider, &budget);
-    let cfg_owned: config::Config = cfg;
-
-    loop {
-        // 1. keys
-        if event::poll(Duration::from_millis(24)).unwrap_or(false) {
-            if let Ok(ev) = event::read() {
-                let kev = ev.as_key_press_event();
-                if let Some(k) = kev {
-                    let reply = app.on_key(k.code, k.modifiers, &cancel);
-                    if app.mode == Mode::Quit {
-                        break;
-                    }
-                    if let Some(r) = reply {
-                        if let Some(tx) = &active_reply_tx {
-                            let _ = tx.send(r).ok();
-                        }
-                    }
-                }
-            }
-        }
-        if app.mode == Mode::Quit {
-            break;
-        }
-
-        // 2. submit a task (Enter parked enter_pending in Input mode)
-        if app.enter_pending && !app.status.running && !app.input.is_empty() {
-            app.enter_pending = false;
-            let task: String = app.input.clone();
-            app.input = String::new();
-            app.status.running = true;
-            cancel.store(false, Ordering::Relaxed);
-            let (reply_tx, agent_reply_rx) = mpsc::channel::<String>();
-            active_reply_tx = Some(reply_tx);
-            spawn_task(
-                cfg_owned.clone(),
-                provider.clone(),
-                budget.clone(),
-                workdir.clone(),
-                journal_path.clone(),
-                task,
-                agent_tx.clone(),
-                agent_reply_rx,
-                cancel.clone(),
-            );
-        }
-
-        // 3. drain agent events
-        if app.status.running {
-            loop {
-                match ui_rx.try_recv() {
-                    Ok(ev) => app.apply(&ev),
-                    Err(_) => break,
-                }
-            }
-        }
-
-        // 4. draw
-        let done = terminal.draw(|frame| app.render(frame));
-        if done.is_err() {
-            break;
-        }
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        eprintln!("curam tui: no display (DISPLAY/WAYLAND_DISPLAY unset); use curam repl");
+        return 1;
     }
-    ratatui::try_restore().ok();
+    let (agent_tx, ui_rx) = mpsc::channel::<UiEv>();
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            gpui_cn::init(cx);
+            cx.bind_keys([KeyBinding::new("ctrl-c", CancelRun, None)]);
+            gpui_kit::open_window(gpui_kit::WindowOptions::default(), cx, move |window, cx| {
+                window.set_window_title("curam");
+                cx.new(|cx| {
+                    View::new(
+                        cfg,
+                        provider,
+                        budget,
+                        workdir,
+                        journal_path,
+                        agent_tx,
+                        ui_rx,
+                        window,
+                        cx,
+                    )
+                })
+            })
+            .expect("curam tui: failed to open window");
+        });
     0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::prelude as rp;
 
     fn sample_app() -> App {
         let cfg = config::Loader::new(None, None).load().unwrap();
@@ -580,69 +627,93 @@ mod tests {
         let b = Budget::from_cfg(&cfg.budget);
         let mut app = App::new(&cfg, &p, &b);
         app.push("user", "add a README".into());
-        app.push("tool", "read {\"path\":\"README.md\"}".into());
+        app.push("tool", read_tool().as_str().into());
         app.push("result", "{\"ok\":true}".into());
         app.status.cost = 0.5;
         app.status.spent = 0.5;
         app
     }
 
-    #[test]
-    fn tui_layout_renders_within_24x80() {
-        let mut app = sample_app();
-        let mut term = rp::Terminal::new(rp::backend::TestBackend::new(80, 24)).unwrap();
-        let ok = term.draw(|frame| app.render(frame));
-        assert!(ok.is_ok(), "draw under 24x80 must not panic");
+    fn read_tool() -> String {
+        "read {\"path\":\"README.md\"}".to_string()
     }
 
     #[test]
-    fn tui_renders_input_and_ask_modes() {
+    fn deltas_fold_into_one_row_and_the_ask_opens() {
         let mut app = sample_app();
-        app.input = "hello curam".into();
-        let mut term = rp::Terminal::new(rp::backend::TestBackend::new(80, 24)).unwrap();
-        assert!(
-            term.draw(|frame| app.render(frame)).is_ok(),
-            "input mode renders"
+        assert_eq!(
+            app.apply(&UiEv {
+                kind: "delta".into(),
+                text: "Hel".into()
+            }),
+            Some(Out::Row("delta".into(), "Hel".into()))
         );
-        let mut app2 = sample_app();
-        app2.mode = Mode::Ask(AskPrompt {
-            question: "proceed?".into(),
-            answer: "".into(),
-        });
-        let mut term2 = rp::Terminal::new(rp::backend::TestBackend::new(80, 24)).unwrap();
-        assert!(
-            term2.draw(|frame| app2.render(frame)).is_ok(),
-            "ask modal renders"
+        assert_eq!(
+            app.apply(&UiEv {
+                kind: "delta".into(),
+                text: "lo".into()
+            }),
+            Some(Out::Append("lo".into()))
         );
-    }
-
-    #[test]
-    fn tui_applies_delta_folding_and_ask_modal() {
-        let mut app = sample_app();
-        app.apply(&UiEv {
-            kind: "delta".into(),
-            text: "Hel".into(),
-        });
-        app.apply(&UiEv {
-            kind: "delta".into(),
-            text: "lo".into(),
-        });
         assert_eq!(app.rows[app.rows.len() - 1].text, "Hello");
-        let ask = UiEv {
+
+        app.apply(&UiEv {
             kind: "ask".into(),
             text: "rm -rf / (destructive)".into(),
-        };
-        app.apply(&ask);
-        assert!(
-            app.mode
-                == Mode::Ask(AskPrompt {
-                    question: "rm -rf / (destructive)".into(),
-                    answer: String::new(),
-                })
+        });
+        assert_eq!(
+            app.mode,
+            Mode::Ask(AskPrompt {
+                question: "rm -rf / (destructive)".into(),
+                answer: String::new(),
+            })
         );
-        let cancel = Arc::new(AtomicBool::new(false));
-        let reply = app.on_key(KeyCode::Char('n'), KeyModifiers::NONE, &cancel);
-        assert_eq!(reply, Some("no".into()));
-        assert!(app.mode == Mode::Input);
+        assert_eq!(app.reply("no"), Some("no".into()));
+        assert_eq!(app.mode, Mode::Input);
+        assert_eq!(app.reply("no"), None);
+    }
+
+    #[test]
+    fn status_updates_do_not_draw_and_done_clears_running() {
+        let mut app = sample_app();
+        app.status.running = true;
+        assert_eq!(
+            app.apply(&UiEv {
+                kind: "status".into(),
+                text: "cost=0.12 spent=1.34".into()
+            }),
+            None
+        );
+        assert_eq!(app.status.cost, 0.12);
+        assert_eq!(app.status.iterations, 1);
+        assert_eq!(
+            app.apply(&UiEv {
+                kind: "done".into(),
+                text: String::new()
+            }),
+            None
+        );
+        assert!(!app.status.running);
+    }
+
+    #[test]
+    fn escape_sequences_from_tool_output_never_reach_the_emulator() {
+        let out = Out::Row("result".into(), "\x1b]52;c;cm0=\x07ok".into());
+        let line = bytes(&out);
+        assert_eq!(line, "\x1b[37m· ]52;c;cm0=ok\x1b[0m");
+        assert_eq!(clean("a\tb\u{7}c\n", 10), "abc");
+        // multi-byte text is capped by chars, never split mid-codepoint
+        assert_eq!(clean("éééé", 2), "éé");
+    }
+
+    #[test]
+    fn rail_carries_provider_cost_and_mode() {
+        let mut app = sample_app();
+        app.status.running = true;
+        let rail = app.rail();
+        assert!(rail[1].contains(&app.status.provider));
+        assert!(rail[2].contains("cost=$0.5"));
+        assert_eq!(rail[5], "mode working");
+        assert_eq!(app.rows.len(), 3);
     }
 }

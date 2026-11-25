@@ -7,9 +7,8 @@
 //! Roadmap: docs/rust-harness-plan.md in the curam-harness repo.
 
 use clap::{Parser, Subcommand, ValueEnum};
-use crossterm::tty::IsTty;
 use std::io::stdin;
-use std::io::stdout;
+use std::io::IsTerminal;
 
 mod budget;
 mod classifier;
@@ -65,7 +64,7 @@ struct Cli {
     #[arg(short, long)]
     quiet: bool,
 
-    /// Force plain output even on a tty (no full-screen TUI)
+    /// Force plain output (no window, no streaming)
     #[arg(long)]
     no_tui: bool,
 
@@ -122,10 +121,10 @@ enum Commands {
     /// Preflight the environment: config, workdir, cage, lists, terminal
     Doctor,
 
-    /// (H5) Full-screen TUI — not implemented yet
+    /// (H5) Desktop window: gpui-kit + libghostty transcript
     Tui,
 
-    /// (H5) Linear REPL — not implemented yet
+    /// (H5) Linear REPL — the no-display fallback
     Repl,
 
     /// (H6) Journal SLO summary — not implemented yet
@@ -174,7 +173,7 @@ fn run(cli: &Cli) -> i32 {
     let loader = config::Loader::new(cli.config.clone(), cli.db.clone());
     match &cli.command {
         None => {
-            // No subcommand: a one-shot task, or the TUI/REPL entry.
+            // No subcommand: a one-shot task, or the window/REPL entry.
             if cli.task.is_empty() {
                 return auto_entry(&loader, cli);
             }
@@ -196,20 +195,12 @@ fn run(cli: &Cli) -> i32 {
     }
 }
 
-/// Auto-entry: the TUI is the default when a task-free interactive tty
-/// supports it (TERM set and sane); otherwise the plain REPL takes over.
+/// Auto-entry: the window is the default when a display is present and
+/// stdin is interactive; otherwise the plain REPL takes over.
 fn auto_entry(loader: &config::Loader, cli: &Cli) -> i32 {
-    let tty_ok = stdout().is_tty() && stdin().is_tty();
-    let term: String = std::env::var_os("TERM")
-        .map(|p| {
-            std::path::PathBuf::from(p)
-                .to_str()
-                .unwrap_or_default()
-                .to_string()
-        })
-        .unwrap_or_default();
-    let term_ok = !term.is_empty() && term != "dumb";
-    if tty_ok && term_ok {
+    let display =
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if display && stdin().is_terminal() {
         let parts = build_parts(loader, cli.no_stream);
         match parts {
             Err(code) => code,
