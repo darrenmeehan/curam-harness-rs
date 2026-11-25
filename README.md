@@ -1,13 +1,46 @@
 # curam — zero-trust coding agent harness (Rust)
 
 The native-Rust harness, built semantic-for-semantic on the proven Python POC
-(`curam/curam-harness-poc`) and linking the pure-Rust security core
-(`curam-security/crates/curam-core`). See `docs/rust-harness-plan.md` in the
-curam-harness-poc repo for the roadmap (build phases H0–H7).
+and linking the pure-Rust security core,
+[published `curam-core`](https://crates.io/crates/curam-core), from crates.io —
+no sibling checkout needed. See
+[`rust-harness-plan.md`](https://github.com/darrenmeehan/curam-harness-poc/blob/main/docs/rust-harness-plan.md)
+for the roadmap (build phases H0–H7).
 
-This is one of four curam repos — see `docs/REPOS.md` in the curam-harness-poc repo
-for the whole set and why it is split. Note the path dependency: this repo must
-be cloned as a sibling of `curam-security`.
+This is one of four curam repos — see
+[`docs/REPOS.md`](https://github.com/darrenmeehan/curam-harness-poc/blob/main/docs/REPOS.md)
+for the whole set and why it is split.
+
+## Install
+
+This repo is a Nix flake, so no checkout is needed:
+
+```bash
+nix run github:darrenmeehan/curam-harness-rs -- --help
+nix profile install github:darrenmeehan/curam-harness-rs
+```
+
+Or as an input in another flake:
+
+```nix
+inputs.curam-harness.url = "github:darrenmeehan/curam-harness-rs";
+# use inputs.curam-harness.packages.${system}.default
+```
+
+From a checkout: `nix build` then `./result/bin/curam`, or
+`nix develop --command cargo build --release`.
+
+Two runtime requirements, both reported by `curam doctor`:
+
+- **`curam-run`** is the bwrap cage and ships with `curam-security`, not this
+  repo. Put it on `PATH` or set `CURAM_RUN_BIN`; the shell and run tools fail
+  closed without it.
+- The **window front end** needs Vulkan plus an X11 or Wayland session.
+  `curam repl` is the no-display fallback.
+
+Only `x86_64-linux` is built and tested. Another system needs its own GUI
+`buildInputs` in `flake.nix` — macOS links ghostty's prebuilt xcframework
+instead of compiling it with Zig.
 
 ## Status
 

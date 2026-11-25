@@ -94,7 +94,8 @@
       # consumer can only enter a dev shell, never install the binary.
       packages.${system}.default = pkgs.rustPlatform.buildRustPackage {
         pname = "curam";
-        version = "0.1.0";
+        # Read, not hardcoded: the crate version has one home.
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
 
@@ -145,6 +146,14 @@
           mainProgram = "curam";
           platforms = [ system ];
         };
+      };
+
+      # `nix run` on its own. Without this it guesses from packages, which
+      # works today but breaks the moment a second package is added.
+      apps.${system}.default = {
+        type = "app";
+        program = "${self.packages.${system}.default}/bin/curam";
+        meta.description = "zero-trust coding agent harness";
       };
 
       formatter.${system} = pkgs.nixpkgs-fmt;
