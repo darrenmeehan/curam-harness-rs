@@ -1,11 +1,11 @@
 # curam — zero-trust coding agent harness (Rust)
 
 The native-Rust harness, built semantic-for-semantic on the proven Python POC
-(`curam/curam-harness`) and linking the pure-Rust security core
+(`curam/curam-harness-poc`) and linking the pure-Rust security core
 (`curam-security/crates/curam-core`). See `docs/rust-harness-plan.md` in the
-curam-harness repo for the roadmap (build phases H0–H7).
+curam-harness-poc repo for the roadmap (build phases H0–H7).
 
-This is one of four curam repos — see `docs/REPOS.md` in the curam-harness repo
+This is one of four curam repos — see `docs/REPOS.md` in the curam-harness-poc repo
 for the whole set and why it is split. Note the path dependency: this repo must
 be cloned as a sibling of `curam-security`.
 
