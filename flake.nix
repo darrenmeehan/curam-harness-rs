@@ -161,26 +161,8 @@
               }} $out/ghostty-vt-1.0.1.xcframework.zip
             '';
           };
-        in
-        {
-          devShells.${system}.default = pkgs.mkShell {
-            # `rustc`, `cargo`, `rust-analyzer`, `cargo clippy` all come from
-            # here — nothing in the global profile provides them.
-            nativeBuildInputs = [ toolchain ] ++ ghosttyNativeInputs;
-            buildInputs = guiBuildInputs;
 
-            env = {
-              RUST_BACKTRACE = "1";
-              # rust-analyzer runs `cargo check`/`clippy` in the background and
-              # uses this for "go to definition" into the standard library
-              # (rust-src).
-              RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
-            };
-          };
-
-          # `nix build` / `nix profile install .#` / `nix run`. Without this a
-          # consumer can only enter a dev shell, never install the binary.
-          packages.${system}.default = pkgs.rustPlatform.buildRustPackage ({
+          curamPkg = pkgs.rustPlatform.buildRustPackage ({
             pname = "curam";
             # Read, not hardcoded: the crate version has one home.
             version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
@@ -211,6 +193,74 @@
               platforms = systems;
             };
           } // (if darwin then ghosttyDarwin else ghosttyLinux));
+
+          # The cage: every shell/run tool spawns `curam-run`, a binary from the
+          # sibling curam-security repo. src/cage.rs resolves it as CURAM_RUN_BIN,
+          # then the [cage] binary config value, then `curam-run` on PATH — and
+          # a package that ships only `curam` leaves that last one empty, so a
+          # fresh `nix profile install` fails `curam doctor` with "cage
+          # curam-run not found on PATH". Ship both binaries from one package
+          # instead of resurrecting a $HOME dev-checkout fallback.
+          #
+          # Pinned by rev, not by branch: the build must be reproducible, and
+          # that repo's own lockfile pins its dependency graph.
+          curamSecurity = pkgs.fetchFromGitHub {
+            owner = "darrenmeehan";
+            repo = "curam-security";
+            rev = "c95181fe8e4b4700ae4f0c869f697b03ce60d47c";
+            hash = "sha256-IMd1ExdgosAaqqtoy1cPk1XmkzP5XbJ/Werbd8UmOzQ=";
+          };
+
+          # One crate out of that workspace; cargoLock covers the whole graph.
+          curamRun = pkgs.rustPlatform.buildRustPackage {
+            pname = "curam-run";
+            version = "0.1.0";
+            src = curamSecurity;
+            cargoLock.lockFile = "${curamSecurity}/Cargo.lock";
+            cargoBuildFlags = [ "-p" "curam-run" ];
+            # That crate's tests want a real bwrap and a writable sandbox; they
+            # run in its own repo's dev shell, not in this derivation.
+            doCheck = false;
+            meta = {
+              description = "curam cage binary — sandboxed exec over bwrap";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "curam-run";
+              platforms = [ "x86_64-linux" "aarch64-linux" ];
+            };
+          };
+        in
+        {
+          devShells.${system}.default = pkgs.mkShell {
+            # `rustc`, `cargo`, `rust-analyzer`, `cargo clippy` all come from
+            # here — nothing in the global profile provides them.
+            nativeBuildInputs = [ toolchain ] ++ ghosttyNativeInputs;
+            buildInputs = guiBuildInputs;
+
+            env = {
+              RUST_BACKTRACE = "1";
+              # rust-analyzer runs `cargo check`/`clippy` in the background and
+              # uses this for "go to definition" into the standard library
+              # (rust-src).
+              RUST_SRC_PATH = "${toolchain}/lib/rustlib/src/rust/library";
+            };
+          };
+
+          # `nix build` / `nix profile install .#` / `nix run`. Without this a
+          # consumer can only enter a dev shell, never install the binary.
+          #
+          # Linux gets both binaries: curam-run (the cage) is a separate binary
+          # and src/cage.rs looks it up on PATH, so a curam-only package fails
+          # `curam doctor`. Darwin stays curam-only — curam-run drives
+          # bubblewrap, which does not exist on macOS, so shipping it there
+          # would install a binary that can never work.
+          packages.${system}.default =
+            if darwin then curamPkg else
+            pkgs.symlinkJoin {
+              name = "curam-${curamPkg.version}";
+              paths = [ curamPkg curamRun ];
+              # Keep mainProgram so `nix run` picks curam, not curam-run.
+              meta = curamPkg.meta // { mainProgram = "curam"; };
+            };
 
           # `nix run` on its own. Without this it guesses from packages, which
           # works today but breaks the moment a second package is added.
