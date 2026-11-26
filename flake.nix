@@ -182,7 +182,7 @@
             # costs nothing next to a link failure only a Mac user would hit.
             buildInputs = guiBuildInputs ++ [ pkgs.sqlite ];
 
-            # The unit tests resolve the bwrap cage binary `curam-run`, which lives
+            # The unit tests resolve the bwrap cage binary `curam-cage`, which lives
             # in the sibling curam-security repo. Its own dev shell runs them.
             doCheck = false;
 
@@ -194,12 +194,12 @@
             };
           } // (if darwin then ghosttyDarwin else ghosttyLinux));
 
-          # The cage: every shell/run tool spawns `curam-run`, a binary from the
-          # sibling curam-security repo. src/cage.rs resolves it as CURAM_RUN_BIN,
-          # then the [cage] binary config value, then `curam-run` on PATH — and
+          # The cage: every shell/run tool spawns `curam-cage`, a binary from the
+          # sibling curam-security repo. src/cage.rs resolves it as CURAM_CAGE_BIN,
+          # then the [cage] binary config value, then `curam-cage` on PATH — and
           # a package that ships only `curam` leaves that last one empty, so a
           # fresh `nix profile install` fails `curam doctor` with "cage
-          # curam-run not found on PATH". Ship both binaries from one package
+          # curam-cage not found on PATH". Ship both binaries from one package
           # instead of resurrecting a $HOME dev-checkout fallback.
           #
           # Pinned by rev, not by branch: the build must be reproducible, and
@@ -207,29 +207,29 @@
           curamSecurity = pkgs.fetchFromGitHub {
             owner = "darrenmeehan";
             repo = "curam-security";
-            rev = "65ee50d3e62d8f85f1a38369a35ad7dae1b2eb0a";
-            hash = "sha256-7tUyXb6fx5P2ap0UZ3N6jYbAHI5shD632KQmxBerTEQ=";
+            rev = "b8ca0dcdd25ffb4d078dee506725fae882360ade";
+            hash = "sha256-nncz+Mi/AJVKJx7REiYo/FwaUVl2lkh5b3REdAa3Ij8=";
           };
 
           # One crate out of that workspace; cargoLock covers the whole graph.
-          curamRunRaw = pkgs.rustPlatform.buildRustPackage {
-            pname = "curam-run";
+          curamCageRaw = pkgs.rustPlatform.buildRustPackage {
+            pname = "curam-cage";
             version = "0.1.0";
             src = curamSecurity;
             cargoLock.lockFile = "${curamSecurity}/Cargo.lock";
-            cargoBuildFlags = [ "-p" "curam-run" ];
+            cargoBuildFlags = [ "-p" "curam-cage" ];
             # That crate's tests want a real bwrap and a writable sandbox; they
             # run in its own repo's dev shell, not in this derivation.
             doCheck = false;
             meta = {
               description = "curam cage binary — sandboxed exec over bwrap";
               license = pkgs.lib.licenses.mit;
-              mainProgram = "curam-run";
+              mainProgram = "curam-cage";
               platforms = [ "x86_64-linux" "aarch64-linux" ];
             };
           };
 
-          # curam-run spawns `bwrap` as a bare name — Command::new("bwrap"), no
+          # curam-cage spawns `bwrap` as a bare name — Command::new("bwrap"), no
           # absolute path and no env override — so it needs bubblewrap on PATH
           # or every request fails closed with bwrap:spawn-failed. Ship it rather
           # than telling the user to install it: the wrapper puts this pinned
@@ -240,19 +240,19 @@
           # --ro-bind source is missing, and NixOS has no /lib or /sbin. That
           # was fixed upstream in curam-security 65ee50d (the bind list is now
           # filtered by existence), which is why the pin below is that commit.
-          curamRun = pkgs.runCommandLocal "curam-run-0.1.0" {
+          curamCage = pkgs.runCommandLocal "curam-cage-0.1.0" {
             nativeBuildInputs = [ pkgs.makeWrapper ];
-            meta = curamRunRaw.meta;
+            meta = curamCageRaw.meta;
           } ''
             mkdir -p $out/bin
-            cp ${curamRunRaw}/bin/curam-run $out/bin/curam-run
+            cp ${curamCageRaw}/bin/curam-cage $out/bin/curam-cage
             # --suffix, not --prefix: the HOST's bwrap must win. bwrap's
             # privilege is path-based — a setuid wrapper (NixOS
             # security.wrappers.bwrap -> /run/wrappers/bin/bwrap) or a distro
             # AppArmor profile only applies to that exact path. Prepending the
             # store copy would shadow it and fail on precisely the hosts that
             # need bwrap to be privileged. The vendored copy is the fallback.
-            wrapProgram $out/bin/curam-run \
+            wrapProgram $out/bin/curam-cage \
               --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.bubblewrap ]}
           '';
         in
@@ -275,17 +275,17 @@
           # `nix build` / `nix profile install .#` / `nix run`. Without this a
           # consumer can only enter a dev shell, never install the binary.
           #
-          # Linux gets both binaries: curam-run (the cage) is a separate binary
+          # Linux gets both binaries: curam-cage (the cage) is a separate binary
           # and src/cage.rs looks it up on PATH, so a curam-only package fails
-          # `curam doctor`. Darwin stays curam-only — curam-run drives
+          # `curam doctor`. Darwin stays curam-only — curam-cage drives
           # bubblewrap, which does not exist on macOS, so shipping it there
           # would install a binary that can never work.
           packages.${system}.default =
             if darwin then curamPkg else
             pkgs.symlinkJoin {
               name = "curam-${curamPkg.version}";
-              paths = [ curamPkg curamRun ];
-              # Keep mainProgram so `nix run` picks curam, not curam-run.
+              paths = [ curamPkg curamCage ];
+              # Keep mainProgram so `nix run` picks curam, not curam-cage.
               meta = curamPkg.meta // { mainProgram = "curam"; };
             };
 

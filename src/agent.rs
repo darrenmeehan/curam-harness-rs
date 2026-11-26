@@ -1179,7 +1179,7 @@ mod tests {
         let url = scripted(vec![call.into(), answer.into()], &dir.join("bodies.txt"));
         let mut cfg = test_cfg(url);
         // The cage binary is missing — policy DENY must stop the command first.
-        cfg.cage.binary = "/nonexistent/curam-run".into();
+        cfg.cage.binary = "/nonexistent/curam-cage".into();
         let mut a = agent_for(&cfg, &dir);
         let mut j = Journal::open(dir.join("j.db"), Some("sess".into())).unwrap();
 
@@ -1198,7 +1198,7 @@ mod tests {
     fn shell_runs_through_the_cage_and_journals_verdicts() {
         let dir = tmp_dir("cage");
         // Resolve the real cage binary from the default config first; skip
-        // when this machine has no curam-run build (CI portability guard).
+        // when this machine has no curam-cage build (CI portability guard).
         let default_cfg = config::Loader::new(None, None).load().unwrap();
         let cage = Cage::from_cfg(&default_cfg.cage);
         if !cage.available() {

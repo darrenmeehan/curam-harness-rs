@@ -71,15 +71,15 @@ pub fn run(cfg: &config::Config) -> Vec<Check> {
             out.push(Check {
                 name: "cage".into(),
                 ok: true,
-                detail: format!("curam-run @ {}", p.to_str().unwrap_or_default()),
+                detail: format!("curam-cage @ {}", p.to_str().unwrap_or_default()),
             });
         }
         None => {
             out.push(Check {
                 name: "cage".into(),
                 ok: false,
-                detail: "curam-run not found on PATH — install it (it ships with \
-                    curam-security) or set CURAM_RUN_BIN; shell/run tools fail closed until \
+                detail: "curam-cage not found on PATH — install it (it ships with \
+                    curam-security) or set CURAM_CAGE_BIN; shell/run tools fail closed until \
                     it exists"
                     .into(),
             });
@@ -122,7 +122,7 @@ pub fn run(cfg: &config::Config) -> Vec<Check> {
 }
 
 /// Resolve the cage binary, sharing `cage::resolve_binary` so doctor and the
-/// exec path can never disagree about where `curam-run` is.
+/// exec path can never disagree about where `curam-cage` is.
 fn resolve_cage_bin(cfg: &config::Config) -> Option<PathBuf> {
     let bin = cage::resolve_binary(&cfg.cage);
     bin.exists().then_some(bin)

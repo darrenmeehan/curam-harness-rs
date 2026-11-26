@@ -72,7 +72,7 @@ ask_programs = ["git", "curl", "wget", "scp", "bash", "sh"]
 deny_programs = []
 
 [cage]
-binary = "curam-run"
+binary = "curam-cage"
 lists_dir = "~/.local/share/curam/lists"
 geo = ""
 fallback = "deny"
@@ -888,7 +888,7 @@ fn need_run(t: &Table, warnings: &mut Vec<String>) -> Result<RunCfg, ConfigError
 fn need_cage(t: &Table, warnings: &mut Vec<String>) -> Result<CageCfg, ConfigError> {
     match t.get("cage").and_then(|i| i.as_table()) {
         None => Ok(CageCfg {
-            binary: "curam-run".into(),
+            binary: "curam-cage".into(),
             lists_dir: "~/.local/share/curam/lists".into(),
             geo: String::new(),
             fallback: "deny".into(),
@@ -896,7 +896,7 @@ fn need_cage(t: &Table, warnings: &mut Vec<String>) -> Result<CageCfg, ConfigErr
         Some(ct) => {
             warn_unknown(ct, "[cage]", KNOWN_CAGE, warnings);
             Ok(CageCfg {
-                binary: need_str(ct, "cage", "binary", "curam-run")?,
+                binary: need_str(ct, "cage", "binary", "curam-cage")?,
                 lists_dir: need_str(ct, "cage", "lists_dir", "~/.local/share/curam/lists")?,
                 geo: need_str(ct, "cage", "geo", "")?,
                 fallback: need_enum(ct, "cage", "fallback", "deny", &["deny", "ask", "raw"])?,

@@ -209,7 +209,7 @@ fn cage_to_result(r: &cage::CageResult, timeout: u64) -> Value {
     }
 }
 
-/// `shell` — free-text command, run inside the curam-run cage (net on,
+/// `shell` — free-text command, run inside the curam-cage cage (net on,
 /// system dirs read-only, workdir + HOME writable). `fallback_raw` is the
 /// opt-in [cage] fallback for machines without the cage binary.
 pub fn tool_shell(
@@ -248,7 +248,7 @@ pub fn tool_shell(
                     } else {
                         Ok(okish(
                             false,
-                            "curam-run unavailable — install it on PATH (it ships with curam-security) or set CURAM_RUN_BIN",
+                            "curam-cage unavailable — install it on PATH (it ships with curam-security) or set CURAM_CAGE_BIN",
                         ))
                     }
                 }
@@ -311,7 +311,7 @@ pub fn tool_run(
                     } else {
                         Ok(okish(
                             false,
-                            "curam-run unavailable — install it on PATH (it ships with curam-security) or set CURAM_RUN_BIN",
+                            "curam-cage unavailable — install it on PATH (it ships with curam-security) or set CURAM_CAGE_BIN",
                         ))
                     }
                 }
@@ -440,7 +440,7 @@ mod tests {
             .join(format!("{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let wd = &dir;
-        let cage = cage::Cage::at("/nonexistent/curam-run");
+        let cage = cage::Cage::at("/nonexistent/curam-cage");
         assert!(!cage.available());
         let args = serde_json::from_str("{\"command\":\"echo hi\"}").unwrap();
         let binds = writable_binds(wd);
@@ -449,7 +449,7 @@ mod tests {
         assert!(res["error"]
             .as_str()
             .unwrap()
-            .contains("curam-run unavailable"));
+            .contains("curam-cage unavailable"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

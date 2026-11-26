@@ -1,4 +1,4 @@
-//! cage.rs — curam-run ndjson client (the exec boundary, proto/ndjson-spec
+//! cage.rs — curam-cage ndjson client (the exec boundary, proto/ndjson-spec
 //! cage/1). The harness speaks the documented contract over stdio; it does
 //! not import any curam-security code (T6: the contract replayable by any
 //! consumer). Binary resolution is shared with `curam doctor`.
@@ -45,19 +45,19 @@ pub struct Cage {
     pub binary: PathBuf,
 }
 
-/// Resolve the cage binary: CURAM_RUN_BIN env > `[cage] binary`, used as a
+/// Resolve the cage binary: CURAM_CAGE_BIN env > `[cage] binary`, used as a
 /// path when it contains a '/', otherwise looked up on PATH.
 ///
 /// Nothing else is consulted. An unresolved name comes back unchanged so the
 /// caller reports it as missing: a released `curam` must never discover a
 /// developer's checkout under $HOME.
 pub fn resolve_binary(cfg: &CageCfg) -> PathBuf {
-    if let Some(p) = std::env::var_os("CURAM_RUN_BIN") {
+    if let Some(p) = std::env::var_os("CURAM_CAGE_BIN") {
         return PathBuf::from(p);
     }
     let from_cfg = expand_home(cfg.binary.as_str());
     // to_string_lossy, not {:?}: Debug quotes a PathBuf, so the old
-    // format!("{from_cfg:?}") searched PATH for "\"curam-run\"" (with the
+    // format!("{from_cfg:?}") searched PATH for "\"curam-cage\"" (with the
     // quotes) and could never match. The $HOME dev-path fallback hid that.
     let name = from_cfg.to_string_lossy().into_owned();
     if name.contains('/') {
@@ -176,7 +176,7 @@ impl Cage {
         if let Some(mut si) = child.stdin.take() {
             let _ = si.write_all(line.as_bytes());
         }
-        // Safety net: curam-run enforces the internal timeout; cap the
+        // Safety net: curam-cage enforces the internal timeout; cap the
         // client-side wait at timeout + 30s so a wedged cage can't hang us.
         let timeout = req.timeout_s.unwrap_or(0);
         let deadline = if timeout > 0 {
@@ -278,10 +278,10 @@ mod tests {
 
     #[test]
     fn resolve_never_invents_a_dev_path() {
-        let cfg = cage_cfg("curam-run-not-installed");
+        let cfg = cage_cfg("curam-cage-not-installed");
         assert_eq!(
             resolve_binary(&cfg),
-            PathBuf::from("curam-run-not-installed"),
+            PathBuf::from("curam-cage-not-installed"),
             "an unresolved name must come back unchanged"
         );
         assert!(!Cage::from_cfg(&cfg).available());
