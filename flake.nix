@@ -207,12 +207,12 @@
           curamSecurity = pkgs.fetchFromGitHub {
             owner = "darrenmeehan";
             repo = "curam-security";
-            rev = "c95181fe8e4b4700ae4f0c869f697b03ce60d47c";
-            hash = "sha256-IMd1ExdgosAaqqtoy1cPk1XmkzP5XbJ/Werbd8UmOzQ=";
+            rev = "65ee50d3e62d8f85f1a38369a35ad7dae1b2eb0a";
+            hash = "sha256-7tUyXb6fx5P2ap0UZ3N6jYbAHI5shD632KQmxBerTEQ=";
           };
 
           # One crate out of that workspace; cargoLock covers the whole graph.
-          curamRun = pkgs.rustPlatform.buildRustPackage {
+          curamRunRaw = pkgs.rustPlatform.buildRustPackage {
             pname = "curam-run";
             version = "0.1.0";
             src = curamSecurity;
@@ -228,6 +228,27 @@
               platforms = [ "x86_64-linux" "aarch64-linux" ];
             };
           };
+
+          # curam-run spawns `bwrap` as a bare name — Command::new("bwrap"), no
+          # absolute path and no env override — so it needs bubblewrap on PATH
+          # or every request fails closed with bwrap:spawn-failed. Ship it rather
+          # than telling the user to install it: the wrapper puts this pinned
+          # bubblewrap at the FRONT of the child's PATH only, so the host's own
+          # bwrap is untouched and nothing is added to the user's profile.
+          #
+          # Shipping bwrap is not sufficient on its own: bwrap aborts when a
+          # --ro-bind source is missing, and NixOS has no /lib or /sbin. That
+          # was fixed upstream in curam-security 65ee50d (the bind list is now
+          # filtered by existence), which is why the pin below is that commit.
+          curamRun = pkgs.runCommandLocal "curam-run-0.1.0" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+            meta = curamRunRaw.meta;
+          } ''
+            mkdir -p $out/bin
+            cp ${curamRunRaw}/bin/curam-run $out/bin/curam-run
+            wrapProgram $out/bin/curam-run \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bubblewrap ]}
+          '';
         in
         {
           devShells.${system}.default = pkgs.mkShell {
