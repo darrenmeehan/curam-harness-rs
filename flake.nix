@@ -260,7 +260,15 @@
           devShells.${system}.default = pkgs.mkShell {
             # `rustc`, `cargo`, `rust-analyzer`, `cargo clippy` all come from
             # here — nothing in the global profile provides them.
-            nativeBuildInputs = [ toolchain ] ++ ghosttyNativeInputs;
+            #
+            # The cage comes from here too, so `cargo run` in the shell can
+            # actually execute: curam spawns `curam-cage` from PATH, and that
+            # binary in turn spawns `bwrap` from PATH. Neither exists on a bare
+            # host, and shipping them only inside packages.default would leave
+            # every dev run failing closed with bwrap:spawn-failed.
+            # Linux-only: bubblewrap does not exist on Darwin.
+            nativeBuildInputs = [ toolchain ] ++ ghosttyNativeInputs
+              ++ lib.optionals (!darwin) [ pkgs.bubblewrap curamCage ];
             buildInputs = guiBuildInputs;
 
             env = {
