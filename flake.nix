@@ -246,8 +246,14 @@
           } ''
             mkdir -p $out/bin
             cp ${curamRunRaw}/bin/curam-run $out/bin/curam-run
+            # --suffix, not --prefix: the HOST's bwrap must win. bwrap's
+            # privilege is path-based — a setuid wrapper (NixOS
+            # security.wrappers.bwrap -> /run/wrappers/bin/bwrap) or a distro
+            # AppArmor profile only applies to that exact path. Prepending the
+            # store copy would shadow it and fail on precisely the hosts that
+            # need bwrap to be privileged. The vendored copy is the fallback.
             wrapProgram $out/bin/curam-run \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bubblewrap ]}
+              --suffix PATH : ${pkgs.lib.makeBinPath [ pkgs.bubblewrap ]}
           '';
         in
         {
