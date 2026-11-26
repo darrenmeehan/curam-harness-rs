@@ -1,0 +1,97 @@
+# CI for curam-harness-rs. `.github/` did not exist before this file.
+#
+# Every job gets its build environment from the flake, never from apt. The build
+# needs Zig 0.17.1 plus ~a dozen X11/Wayland/fontconfig/freetype/vulkan dev
+# libraries: `mod tui` in src/main.rs is not feature-gated, so even
+# `cargo test` links GPUI and libghostty-vt. Ubuntu has no Zig 0.17 package and
+# ghostty-vt-sys hard-requires 0.17.x, so an apt step is a dead end. The devShell
+# in flake.nix already carries the whole set, pinned by flake.lock.
+#
+# No bubblewrap / user-namespace setup is needed (do not copy curam-security's
+# AppArmor sysctl step): the one test that would execute through the cage
+# self-skips when the curam-run binary is absent (src/agent.rs ~1197), and
+# everything else is pure logic or negative-path.
+#
+# Deliberately NOT a step: `cargo clippy -- -D warnings`. The tree currently
+# emits ~19 dead-code warnings, so denying warnings is red on day one and cannot
+# be exercised without a full build. Clippy *without* the deny asserts nothing —
+# a step that can only ever go yellow. Add clippy together with the deny once
+# those warnings are gone.
+#
+# Caching: `target/` is the only thing worth caching. The ~10 min cold Linux
+# build is dominated by the Zig compile of libghostty-vt *inside* `cargo build`,
+# which lands in target/ — not in /nix/store. Magic Nix Cache would persist the
+# /nix/store closure instead, which the public binary cache (nixpkgs +
+# rust-overlay push there) already substitutes for free: a service dependency
+# for near-zero gain. Swatinem/rust-cache cannot run here at all — it shells out
+# to `rustc -vV` unguarded (src/config.ts) and rustc exists only inside
+# `nix develop` — so plain actions/cache keyed on the lockfiles does the job
+# with no extra moving parts.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: linux — cargo test in the flake devShell
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@4b040423529d49b1a19ba918742e0aa9aa95031a # v3.24.3
+
+      # Keyed on the three files that decide what gets compiled, so a new entry
+      # is only written when dependencies actually move; restore-keys keeps a
+      # partial hit useful across those bumps.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+          key: linux-cargo-${{ hashFiles('Cargo.lock', 'flake.lock', 'rust-toolchain.toml') }}
+          restore-keys: linux-cargo-
+
+      - name: cargo test
+        run: nix develop --command cargo test --locked
+
+  darwin:
+    name: darwin — nix build (aarch64-darwin)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@4b040423529d49b1a19ba918742e0aa9aa95031a # v3.24.3
+
+      # macos-15 hosted runners are arm64, i.e. exactly aarch64-darwin — the
+      # only Apple system flake.nix declares (x86_64-darwin was dropped by the
+      # nixpkgs input). No cache: this is a `nix build`, whose result is a new
+      # store path for every commit, so a Nix cache could never hit.
+      - name: nix build
+        run: nix build -L .#packages.aarch64-darwin.default
+
+      - name: binary runs
+        run: |
+          test -x ./result/bin/curam
+          ./result/bin/curam --help
+
+  audit:
+    name: audit — cargo audit (RUSTSEC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@4b040423529d49b1a19ba918742e0aa9aa95031a # v3.24.3
+
+      # Plain `cargo audit`, no flags. It must run from the repo root so
+      # cargo-audit picks up .cargo/audit.toml — the nine justified
+      # "unmaintained" RUSTSEC ignores live there and nowhere else. Exits
+      # non-zero on any real vulnerability or unsound advisory.
+      - name: cargo audit
+        run: nix run nixpkgs#cargo-audit -- audit
